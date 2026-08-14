@@ -1,0 +1,12 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 开发工具脚本（图标生成器，不进 vsix）
+scripts/
+
+# macOS
+.DS_Store
+
+# VSIX 打包产物
+*.vsix

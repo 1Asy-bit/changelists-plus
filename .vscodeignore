@@ -1,0 +1,11 @@
+# 源码与开发文件（只发布编译产物）
+src/**
+scripts/**
+dist/test/**
+tsconfig.json
+.gitignore
+**/*.map
+
+# 打包产物与依赖
+*.vsix
+node_modules/**

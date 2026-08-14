@@ -1,0 +1,20 @@
+{
+  "changelistsPlus.view.name": "Changelists",
+  "changelistsPlus.command.refresh": "Refresh",
+  "changelistsPlus.command.newChangelist": "New Changelist…",
+  "changelistsPlus.command.renameChangelist": "Rename Changelist",
+  "changelistsPlus.command.deleteChangelist": "Delete Changelist",
+  "changelistsPlus.command.discardChangelist": "Discard Changes",
+  "changelistsPlus.command.commitChangelist": "Commit Changelist…",
+  "changelistsPlus.command.stageChangelist": "Stage Changelist",
+  "changelistsPlus.command.stageHunk": "Stage Change",
+  "changelistsPlus.command.commitUnassigned": "Commit Changes…",
+  "changelistsPlus.command.stageUnassigned": "Stage Changes",
+  "changelistsPlus.command.discardUnassigned": "Discard Changes",
+  "changelistsPlus.command.openFile": "Open File",
+  "changelistsPlus.command.discardFile": "Discard Changes",
+  "changelistsPlus.command.moveToChangelist": "Move to Changelist…",
+  "changelistsPlus.command.assignSelection": "Assign Selected Changes to Changelist…",
+  "changelistsPlus.config.gitPath": "Path to the git executable (default: \"git\")",
+  "changelistsPlus.config.contextLines": "Number of context lines used when computing diffs"
+}

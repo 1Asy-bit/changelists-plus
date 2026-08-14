@@ -1,0 +1,20 @@
+{
+  "changelistsPlus.view.name": "Changelists",
+  "changelistsPlus.command.refresh": "刷新",
+  "changelistsPlus.command.newChangelist": "新建 Changelist…",
+  "changelistsPlus.command.renameChangelist": "重命名 Changelist",
+  "changelistsPlus.command.deleteChangelist": "删除 Changelist",
+  "changelistsPlus.command.discardChangelist": "撤销改动",
+  "changelistsPlus.command.commitChangelist": "提交 Changelist…",
+  "changelistsPlus.command.stageChangelist": "暂存 Changelist",
+  "changelistsPlus.command.stageHunk": "暂存改动",
+  "changelistsPlus.command.commitUnassigned": "提交改动…",
+  "changelistsPlus.command.stageUnassigned": "暂存改动",
+  "changelistsPlus.command.discardUnassigned": "撤销改动",
+  "changelistsPlus.command.openFile": "打开文件",
+  "changelistsPlus.command.discardFile": "撤销修改",
+  "changelistsPlus.command.moveToChangelist": "移动到 Changelist…",
+  "changelistsPlus.command.assignSelection": "把选中改动分配到 Changelist…",
+  "changelistsPlus.config.gitPath": "git 可执行文件路径（默认 \"git\"）",
+  "changelistsPlus.config.contextLines": "计算差异时使用的上下文行数"
+}

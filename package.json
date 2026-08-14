@@ -1,0 +1,328 @@
+{
+  "name": "changelists-plus",
+  "displayName": "Changelists Plus",
+  "description": "IDEA-style changelists with partial commit: split changes inside a single file across changelists and commit them separately",
+  "version": "0.2.8",
+  "publisher": "1Asy-bit",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1Asy-bit/changelists-plus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1Asy-bit/changelists-plus/issues"
+  },
+  "homepage": "https://github.com/1Asy-bit/changelists-plus",
+  "icon": "icon.png",
+  "license": "MIT",
+  "keywords": [
+    "changelist",
+    "partial commit",
+    "scm",
+    "source control",
+    "git",
+    "intellij",
+    "idea",
+    "changelogs"
+  ],
+  "galleryBanner": {
+    "color": "#4f46e5",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "views": {
+      "scm": [
+        {
+          "id": "changelistsPlus",
+          "name": "%changelistsPlus.view.name%",
+          "icon": "$(source-control)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "changelistsPlus.refresh",
+        "title": "%changelistsPlus.command.refresh%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "changelistsPlus.newChangelist",
+        "title": "%changelistsPlus.command.newChangelist%",
+        "icon": "$(add)"
+      },
+      {
+        "command": "changelistsPlus.renameChangelist",
+        "title": "%changelistsPlus.command.renameChangelist%",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "changelistsPlus.deleteChangelist",
+        "title": "%changelistsPlus.command.deleteChangelist%",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "changelistsPlus.discardChangelist",
+        "title": "%changelistsPlus.command.discardChangelist%",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "changelistsPlus.commitChangelist",
+        "title": "%changelistsPlus.command.commitChangelist%",
+        "icon": "$(check)"
+      },
+      {
+        "command": "changelistsPlus.stageChangelist",
+        "title": "%changelistsPlus.command.stageChangelist%",
+        "icon": "$(diff-added)"
+      },
+      {
+        "command": "changelistsPlus.stageHunk",
+        "title": "%changelistsPlus.command.stageHunk%",
+        "icon": "$(diff-added)"
+      },
+      {
+        "command": "changelistsPlus.commitUnassigned",
+        "title": "%changelistsPlus.command.commitUnassigned%",
+        "icon": "$(check)"
+      },
+      {
+        "command": "changelistsPlus.stageUnassigned",
+        "title": "%changelistsPlus.command.stageUnassigned%",
+        "icon": "$(diff-added)"
+      },
+      {
+        "command": "changelistsPlus.discardUnassigned",
+        "title": "%changelistsPlus.command.discardUnassigned%",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "changelistsPlus.openFile",
+        "title": "%changelistsPlus.command.openFile%",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "changelistsPlus.discardFile",
+        "title": "%changelistsPlus.command.discardFile%",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "changelistsPlus.moveToChangelist",
+        "title": "%changelistsPlus.command.moveToChangelist%"
+      },
+      {
+        "command": "changelistsPlus.assignSelectionToChangelist",
+        "title": "%changelistsPlus.command.assignSelection%"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "changelistsPlus.newChangelist",
+          "when": "view == changelistsPlus",
+          "group": "navigation@1"
+        },
+        {
+          "command": "changelistsPlus.refresh",
+          "when": "view == changelistsPlus",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "changelistsPlus.commitChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "changelistsPlus@1"
+        },
+        {
+          "command": "changelistsPlus.stageChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "changelistsPlus@2"
+        },
+        {
+          "command": "changelistsPlus.renameChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "changelistsPlus@3"
+        },
+        {
+          "command": "changelistsPlus.discardChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "changelistsPlus@4"
+        },
+        {
+          "command": "changelistsPlus.deleteChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "changelistsPlus@5"
+        },
+        {
+          "command": "changelistsPlus.commitChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "inline@1"
+        },
+        {
+          "command": "changelistsPlus.stageChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "inline@2"
+        },
+        {
+          "command": "changelistsPlus.discardChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "inline@3"
+        },
+        {
+          "command": "changelistsPlus.deleteChangelist",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "inline@4"
+        },
+        {
+          "command": "changelistsPlus.commitUnassigned",
+          "when": "view == changelistsPlus && viewItem == unassigned",
+          "group": "changelistsPlus@1"
+        },
+        {
+          "command": "changelistsPlus.stageUnassigned",
+          "when": "view == changelistsPlus && viewItem == unassigned",
+          "group": "changelistsPlus@2"
+        },
+        {
+          "command": "changelistsPlus.discardUnassigned",
+          "when": "view == changelistsPlus && viewItem == unassigned",
+          "group": "changelistsPlus@3"
+        },
+        {
+          "command": "changelistsPlus.commitUnassigned",
+          "when": "view == changelistsPlus && viewItem == unassigned",
+          "group": "inline@1"
+        },
+        {
+          "command": "changelistsPlus.stageUnassigned",
+          "when": "view == changelistsPlus && viewItem == unassigned",
+          "group": "inline@2"
+        },
+        {
+          "command": "changelistsPlus.discardUnassigned",
+          "when": "view == changelistsPlus && viewItem == unassigned",
+          "group": "inline@3"
+        },
+        {
+          "command": "changelistsPlus.moveToChangelist",
+          "when": "view == changelistsPlus && (viewItem == file || viewItem == unassignedFile)",
+          "group": "changelistsPlus@1"
+        },
+        {
+          "command": "changelistsPlus.stageHunk",
+          "when": "view == changelistsPlus && (viewItem == file || viewItem == unassignedFile)",
+          "group": "changelistsPlus@2"
+        },
+        {
+          "command": "changelistsPlus.openFile",
+          "when": "view == changelistsPlus && (viewItem == file || viewItem == unassignedFile)",
+          "group": "inline@1"
+        },
+        {
+          "command": "changelistsPlus.discardFile",
+          "when": "view == changelistsPlus && (viewItem == file || viewItem == unassignedFile)",
+          "group": "inline@2"
+        },
+        {
+          "command": "changelistsPlus.stageHunk",
+          "when": "view == changelistsPlus && (viewItem == file || viewItem == unassignedFile)",
+          "group": "inline@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "changelistsPlus.assignSelectionToChangelist",
+          "when": "editorHasSelection",
+          "group": "changelistsPlus@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "changelistsPlus.renameChangelist",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.deleteChangelist",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.discardChangelist",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.commitChangelist",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.stageChangelist",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.stageHunk",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.commitUnassigned",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.stageUnassigned",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.discardUnassigned",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.openFile",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.discardFile",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.moveToChangelist",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Changelists Plus",
+      "properties": {
+        "changelistsPlus.gitPath": {
+          "type": "string",
+          "default": "git",
+          "description": "%changelistsPlus.config.gitPath%"
+        },
+        "changelistsPlus.contextLines": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 20,
+          "description": "%changelistsPlus.config.contextLines%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node dist/test/run.js",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "^2.21.1",
+    "cheerio": "^1.0.0-rc.12",
+    "parse5": "^6.0.1",
+    "typescript": "~5.5.4"
+  }
+}
