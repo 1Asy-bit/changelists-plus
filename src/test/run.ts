@@ -31,7 +31,7 @@ import {
   stageRecords,
   stageUnassigned,
 } from '../commitEngine';
-import { ChangeDetector } from '../changeDetector';
+import { ChangeDetector, combineStageStates, stageStateOf } from '../changeDetector';
 
 const GIT = 'git';
 
@@ -1469,6 +1469,273 @@ test('U0 端到端: 删除块撤销（删除块 + 后续修改块共存）', asy
     assert.strictEqual(rest.hunks.length, 1);
     assert.strictEqual(rest.hunks[0].newLines, 1);
     assert.strictEqual(store.recordsWithOwner(dir, 'f.txt').length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ================= 暂存状态圆点（staged 缓存与三态判定） =================
+
+test('staged: stageStateOf / combineStageStates 纯函数边界', () => {
+  assert.strictEqual(stageStateOf([], new Set()), 'none'); // 空 ids
+  assert.strictEqual(stageStateOf(['a'], undefined), 'none'); // 无缓存
+  assert.strictEqual(stageStateOf(['a'], new Set(['a'])), 'all');
+  assert.strictEqual(stageStateOf(['a', 'b'], new Set(['a'])), 'partial');
+  assert.strictEqual(stageStateOf(['a', 'b'], new Set(['a', 'b'])), 'all');
+  assert.strictEqual(stageStateOf(['a', 'b'], new Set()), 'none'); // 空集合
+  assert.strictEqual(combineStageStates([]), 'none'); // 空数组
+  assert.strictEqual(combineStageStates(['all', 'all']), 'all');
+  assert.strictEqual(combineStageStates(['none', 'none']), 'none');
+  assert.strictEqual(combineStageStates(['all', 'none']), 'partial');
+  assert.strictEqual(combineStageStates(['partial', 'all']), 'partial');
+});
+
+test('staged: refreshRepo 缓存只含真正暂存的 hunk', async () => {
+  const { dir, gitSvc, store, hunkB } = await setupTwoHunkScenario();
+  try {
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    assert.strictEqual(det.stagedIds(root, 'f.txt'), undefined); // 无暂存 → undefined
+
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    const bOnly = serializePatch([{ ...fc, hunks: [hunkB] }]);
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'], bOnly);
+    await det.refreshAll();
+    const staged = det.stagedIds(root, 'f.txt');
+    assert.ok(staged && staged.has(hunkB.id) && !staged.has(fc.hunks[0].id));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: 三态集成——无暂存 none / 部分 partial / 全暂存 all', async () => {
+  const { dir, gitSvc, store, hunkA, hunkB } = await setupTwoHunkScenario();
+  try {
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    const m = det.getModel(root)!;
+    const allIds = m.files[0].hunks.map((h) => h.hunk.id);
+    // 无暂存 → none
+    assert.strictEqual(stageStateOf(allIds, det.stagedIds(root, 'f.txt')), 'none');
+
+    // 只暂存 B → partial
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'],
+      serializePatch([{ ...fc, hunks: [hunkB] }]));
+    await det.refreshAll();
+    assert.strictEqual(stageStateOf(allIds, det.stagedIds(root, 'f.txt')), 'partial');
+
+    // 全暂存 → all
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'],
+      serializePatch([{ ...fc, hunks: [hunkA] }]));
+    await det.refreshAll();
+    assert.strictEqual(stageStateOf(allIds, det.stagedIds(root, 'f.txt')), 'all');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: 提交后缓存如实反映——提交的消失、restore 保留的仍在', async () => {
+  const { dir, gitSvc, store, cl, hunkA, hunkB } = await setupTwoHunkScenario();
+  try {
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'],
+      serializePatch([{ ...fc, hunks: [hunkB] }]));
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    assert.ok(det.stagedIds(root, 'f.txt')?.has(hunkB.id));
+
+    // 提交 changelist（A）→ restore 后 index 仍保留 B
+    const r1 = await commitChangelist({
+      git: gitSvc, store, repoRoot: dir, changelistId: cl.id, message: 'c1',
+    });
+    assert.ok(r1.ok, JSON.stringify(r1));
+    await det.refreshAll();
+    assert.ok(det.stagedIds(root, 'f.txt')?.has(hunkB.id), 'restore 保留的 staged 必须仍在缓存');
+    assert.ok(!det.stagedIds(root, 'f.txt')?.has(hunkA.id), '提交的 hunk 不在缓存');
+
+    // 再提交未分配（B）→ index 对齐新 HEAD，缓存清空
+    const r2 = await commitUnassigned({
+      git: gitSvc, store, repoRoot: dir, message: 'c2',
+    });
+    assert.ok(r2.ok, JSON.stringify(r2));
+    await det.refreshAll();
+    assert.strictEqual(det.stagedIds(root, 'f.txt'), undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: 未跟踪文件 git add 后 id 匹配（绿点）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'v1\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'new.txt', 'hello\nworld\n');
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    const m = det.getModel(root)!;
+    const newFile = m.files.find((f) => f.change.path === 'new.txt');
+    assert.ok(newFile && newFile.change.kind === 'new');
+    const modelId = newFile!.hunks[0].hunk.id;
+    assert.strictEqual(det.stagedIds(root, 'new.txt'), undefined); // 未 stage
+
+    git(dir, ['add', 'new.txt']);
+    await det.refreshAll();
+    const staged = det.stagedIds(root, 'new.txt');
+    assert.ok(staged && staged.has(modelId), 'git add 后合成 hunk id 必须命中缓存');
+    assert.strictEqual(stageStateOf([modelId], staged), 'all');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: 未跟踪 CRLF 文件（autocrlf）add 后 EOL 归一匹配', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'v1\n');
+    commitAll(dir, 'init');
+    git(dir, ['config', 'core.autocrlf', 'true']);
+    writeFile(dir, 'crlf.txt', 'l1\r\nl2\r\n');
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    const nf = det.getModel(root)!.files.find((f) => f.change.path === 'crlf.txt');
+    assert.ok(nf);
+    const modelId = nf!.hunks[0].hunk.id;
+    git(dir, ['add', 'crlf.txt']);
+    await det.refreshAll();
+    const staged = det.stagedIds(root, 'crlf.txt');
+    assert.ok(staged && staged.has(modelId), 'CRLF 下 diffStaged 的 hunk id 必须与模型一致');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: staged 后工作区再编辑同一 hunk → id 失配 → 未暂存（feature 语义）', async () => {
+  const { dir, gitSvc, store, hunkA, hunkB } = await setupTwoHunkScenario();
+  try {
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'],
+      serializePatch([{ ...fc, hunks: [hunkB] }]));
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    assert.ok(det.stagedIds(root, 'f.txt')?.has(hunkB.id));
+
+    // 工作区把 B1 改成 B2（index 中仍是旧版 B1）
+    writeFile(dir, 'f.txt', 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nB2\nl12\nl13\nl14\n');
+    await det.refreshAll();
+    const m = det.getModel(root)!;
+    // A 内容未变 → id 不变；B 变了 → 新 id（旧 hunkB.id 不应再出现）
+    const ids = m.files[0].hunks.map((h) => h.hunk.id);
+    assert.ok(ids.includes(hunkA.id), 'A 未变，id 不变');
+    assert.ok(!ids.includes(hunkB.id), 'B 内容已变，旧 id 消失');
+    const newB = m.files[0].hunks.find((h) => h.hunk.id !== hunkA.id)!;
+    assert.ok(newB, '新版本 hunk 必须在模型中');
+    assert.ok(!det.stagedIds(root, 'f.txt')?.has(newB.hunk.id), '新版本未暂存 → 失配');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: discard 后缓存同步（index 反向 apply 被如实反映）', async () => {
+  const { dir, gitSvc, store, cl, hunkA, hunkB } = await setupTwoHunkScenario();
+  try {
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'], serializePatch([fc]));
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    assert.ok(det.stagedIds(root, 'f.txt')?.has(hunkA.id));
+    assert.ok(det.stagedIds(root, 'f.txt')?.has(hunkB.id));
+
+    const r = await discardChangelist(gitSvc, store, dir, cl.id);
+    assert.ok(r.ok, JSON.stringify(r));
+    await det.refreshAll();
+    const staged = det.stagedIds(root, 'f.txt');
+    assert.ok(staged && !staged.has(hunkA.id), 'A 撤销后不在 index');
+    assert.ok(staged.has(hunkB.id), 'B 保留在 index');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: refreshFile 不重算缓存（保存不改变 index）', async () => {
+  const { dir, gitSvc, store, hunkB } = await setupTwoHunkScenario();
+  try {
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'],
+      serializePatch([{ ...fc, hunks: [hunkB] }]));
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    assert.ok(det.stagedIds(root, 'f.txt')?.has(hunkB.id));
+
+    // 保存文件（追加行，新增 hunk）→ refreshFile 后缓存不变
+    writeFile(dir, 'f.txt', 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nB1\nl12\nl13\nl14\nl15\n');
+    await det.refreshFile(path.join(dir, 'f.txt'));
+    const m = det.getModel(root)!;
+    assert.ok(m.files[0].hunks.some((h) => h.hunk.id === hunkB.id));
+    assert.ok(det.stagedIds(root, 'f.txt')?.has(hunkB.id), 'refreshFile 不得清空 staged 缓存');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: 删除文件 git add 后 id 匹配', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\n');
+    commitAll(dir, 'init');
+    fs.rmSync(path.join(dir, 'f.txt')); // worktree 删除，index 不动
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    const m = det.getModel(root)!;
+    const df = m.files.find((f) => f.change.path === 'f.txt');
+    assert.ok(df && df.change.kind === 'deleted');
+    const delId = df!.hunks[0].hunk.id;
+    assert.strictEqual(det.stagedIds(root, 'f.txt'), undefined); // 未 stage
+
+    git(dir, ['add', '-A']);
+    await det.refreshAll();
+    const staged = det.stagedIds(root, 'f.txt');
+    assert.ok(staged && staged.has(delId), '删除 hunk 必须命中缓存');
+    assert.strictEqual(stageStateOf([delId], staged), 'all');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: unborn HEAD 仓库 refreshAll 不崩（diff --cached 对比空树）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'new.txt', 'hello\n');
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型/缓存按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll(); // 不抛异常即可
+    const m = det.getModel(root);
+    assert.ok(m && m.files.some((f) => f.change.path === 'new.txt'));
+    assert.ok(!m!.headExists);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

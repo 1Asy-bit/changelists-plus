@@ -54,11 +54,61 @@ export interface RepoModel {
   unassignedHunkCount: number;
 }
 
+/** 暂存状态（index 中 hunk 的占比）：全暂存 / 部分 / 未暂存 */
+export type StageState = 'all' | 'partial' | 'none';
+
+/**
+ * 给定 hunk id 列表与暂存集合，判定暂存状态：
+ * 空列表或集合为空 → none；全部命中 → all；其余 → partial。
+ */
+export function stageStateOf(
+  ids: Iterable<string>,
+  staged: ReadonlySet<string> | undefined,
+): StageState {
+  let hit = 0;
+  let total = 0;
+  if (staged) {
+    for (const id of ids) {
+      total++;
+      if (staged.has(id)) {
+        hit++;
+      }
+    }
+  }
+  if (total === 0 || hit === 0) {
+    return 'none';
+  }
+  return hit === total ? 'all' : 'partial';
+}
+
+/** 跨文件/跨块聚合：空数组 → none；全 all → all；全 none → none；其余 → partial */
+export function combineStageStates(states: readonly StageState[]): StageState {
+  let all = true;
+  let any = false;
+  for (const s of states) {
+    if (s === 'all') {
+      any = true;
+    } else {
+      all = false;
+    }
+  }
+  if (!any) {
+    return 'none';
+  }
+  return all ? 'all' : 'partial';
+}
+
 export class ChangeDetector extends EventEmitter {
   private models = new Map<string, RepoModel>();
   private folderRoots = new Map<string, string | null>();
   /** key: `${root}\u0000${path}\u0000${id}` → 连续未匹配次数 */
   private misses = new Map<string, number>();
+  /**
+   * 暂存缓存：repoRoot → 相对路径 → 已暂存 hunk id 集合（git diff --cached 解析产物）。
+   * 只在 refreshRepo 时重算：保存文件不改变 index，外部 git 操作（add/reset/commit）
+   * 会经 .git/index watcher 触发 refreshAll → refreshRepo。
+   */
+  private stagedByRoot = new Map<string, Map<string, Set<string>>>();
 
   constructor(
     private git: GitService,
@@ -105,6 +155,7 @@ export class ChangeDetector extends EventEmitter {
     for (const key of [...this.models.keys()]) {
       if (!roots.has(key)) {
         this.models.delete(key);
+        this.stagedByRoot.delete(key);
       }
     }
     this.emit('change');
@@ -136,10 +187,18 @@ export class ChangeDetector extends EventEmitter {
   }
 
   private async refreshRepo(root: string): Promise<void> {
-    const [diffText, untracked] = await Promise.all([
+    const [diffText, untracked, stagedText] = await Promise.all([
       this.git.diffWorktree(root),
       this.git.untrackedFiles(root),
+      this.git.diffStaged(root),
     ]);
+    // 暂存缓存：diff --cached 与 diffWorktree 同 flags 同解析器，路径/换行体系一致，
+    // hunk id 为内容哈希，直接与视图模型 hunk 匹配（staged 后工作区再编辑 → id 变 → 自然失配）
+    const staged = new Map<string, Set<string>>();
+    for (const fc of parseGitDiff(stagedText)) {
+      staged.set(fc.path, new Set(fc.hunks.map((h) => h.id)));
+    }
+    this.stagedByRoot.set(root, staged);
     const files: FileModel[] = [];
     for (const fc of parseGitDiff(diffText)) {
       files.push(this.buildModelForChange(root, fc));
@@ -269,6 +328,11 @@ export class ChangeDetector extends EventEmitter {
 
   getModel(root: string): RepoModel | undefined {
     return this.models.get(root);
+  }
+
+  /** 某文件已暂存的 hunk id 集合（index 中 vs HEAD 的改动）；未刷新或无暂存 → undefined */
+  stagedIds(root: string, relPath: string): ReadonlySet<string> | undefined {
+    return this.stagedByRoot.get(root)?.get(relPath);
   }
 
   snapshot(): RepoModel[] {

@@ -9,12 +9,21 @@
  */
 import * as vscode from 'vscode';
 import * as path from 'path';
-import type { ChangeDetector, FileModel, RepoModel } from './changeDetector';
+import { ChangeDetector, FileModel, RepoModel, StageState, stageStateOf, combineStageStates } from './changeDetector';
 import type { ChangelistStore } from './changelistStore';
 import type { Hunk } from './diffParser';
 import { t } from './i18n';
 
 const DRAG_MIME = 'application/vnd.code.tree.changelistsplus';
+
+/** 暂存状态圆点：changelist / default / 文件行的图标（替代原来的 codicon 图标） */
+const STAGE_ICON = 'circle-filled';
+/** 三态 → 主题色 key（VS Code SCM 惯例：绿=已暂存、橙=修改；灰用核心主题色 disabledForeground） */
+const STAGE_COLOR: Record<StageState, string> = {
+  all: 'gitDecoration.addedResourceForeground',
+  partial: 'gitDecoration.modifiedResourceForeground',
+  none: 'disabledForeground',
+};
 
 /** 文件节点所在的视图上下文：'unassigned' 或 changelist id */
 export type FileView = string | 'unassigned';
@@ -39,6 +48,8 @@ export class TreeNode {
     public readonly hunk: Hunk | undefined = undefined,
     public readonly changelistId: string | undefined = undefined,
     public readonly tooltip = '',
+    /** 主题色 key；非空时 icon 用 ThemeIcon(icon, ThemeColor(iconColor)) */
+    public readonly iconColor = '',
   ) {}
 }
 
@@ -60,7 +71,9 @@ export class ChangelistTreeProvider implements vscode.TreeDataProvider<TreeNode>
     item.contextValue = node.contextValue;
     item.description = node.description || undefined;
     item.tooltip = node.tooltip || undefined;
-    item.iconPath = node.icon ? new vscode.ThemeIcon(node.icon) : undefined;
+    item.iconPath = node.icon
+      ? new vscode.ThemeIcon(node.icon, node.iconColor ? new vscode.ThemeColor(node.iconColor) : undefined)
+      : undefined;
     if (node.kind === 'file' && node.repoRoot && node.filePath) {
       // 点击文件 → 打开只含该视图修改的 diff（命令内异步合成右侧内容）
       item.command = {
@@ -116,6 +129,25 @@ export class ChangelistTreeProvider implements vscode.TreeDataProvider<TreeNode>
     );
   }
 
+  /**
+   * 单遍扫描每个文件的暂存状态，按归属聚合（key：'null' = unassigned / changelist id）。
+   * 每个文件只扫一次，避免 O(changelist 数 × 文件数) 嵌套。
+   */
+  private stageStatesByOwner(model: RepoModel): Map<string, StageState[]> {
+    const byOwner = new Map<string, StageState[]>();
+    for (const f of model.files) {
+      const staged = this.detector.stagedIds(model.repoRoot, f.change.path);
+      const owners = new Set(f.hunks.map((h) => h.ownerId ?? 'null'));
+      for (const owner of owners) {
+        const ids = f.hunks.filter((h) => (h.ownerId ?? 'null') === owner).map((h) => h.hunk.id);
+        const list = byOwner.get(owner) ?? [];
+        list.push(stageStateOf(ids, staged));
+        byOwner.set(owner, list);
+      }
+    }
+    return byOwner;
+  }
+
   private repoNodes(model: RepoModel | undefined): TreeNode[] {
     if (!model) {
       return [];
@@ -126,18 +158,26 @@ export class ChangelistTreeProvider implements vscode.TreeDataProvider<TreeNode>
         new TreeNode('message', t('noHeadInfo'), vscode.TreeItemCollapsibleState.None, 'message', '', 'info'),
       );
     }
+    const byOwner = this.stageStatesByOwner(model);
+    const unassignedState = combineStageStates(byOwner.get('null') ?? []);
     const unassigned = new TreeNode(
       'unassigned',
       t('unassigned'),
       vscode.TreeItemCollapsibleState.Expanded,
       'unassigned',
       String(model.unassignedHunkCount),
-      'inbox',
+      STAGE_ICON,
       model.repoRoot,
+      '',
+      undefined,
+      undefined,
+      '',
+      STAGE_COLOR[unassignedState],
     );
     nodes.push(unassigned);
     for (const cl of model.changelists) {
       const desc = t('fileCount', cl.fileCount);
+      const state = combineStageStates(byOwner.get(cl.id) ?? []);
       nodes.push(
         new TreeNode(
           'changelist',
@@ -145,11 +185,13 @@ export class ChangelistTreeProvider implements vscode.TreeDataProvider<TreeNode>
           vscode.TreeItemCollapsibleState.Expanded,
           'changelist',
           desc,
-          'list-unordered',
+          STAGE_ICON,
           model.repoRoot,
           '',
           undefined,
           cl.id,
+          '',
+          STAGE_COLOR[state],
         ),
       );
     }
@@ -188,18 +230,24 @@ export class ChangelistTreeProvider implements vscode.TreeDataProvider<TreeNode>
     ]
       .filter(Boolean)
       .join(' · ');
+    // 圆点颜色 = 该视图下 hunks 的暂存状态（binary 无 hunks，保留原图标作防御）
+    const stageState = stageStateOf(
+      viewHunks.map((h) => h.hunk.id),
+      this.detector.stagedIds(repoRoot, f.change.path),
+    );
     return new TreeNode(
       'file',
       base,
       vscode.TreeItemCollapsibleState.None,
       isUnassignedOwner ? 'unassignedFile' : 'file',
       desc,
-      f.change.binary ? 'file-binary' : 'file',
+      f.change.binary ? 'file-binary' : STAGE_ICON,
       repoRoot,
       f.change.path,
       undefined,
       changelistId,
       f.change.path,
+      f.change.binary ? '' : STAGE_COLOR[stageState],
     );
   }
 }
