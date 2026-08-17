@@ -27,7 +27,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel(t('viewName'));
   const cfg = vscode.workspace.getConfiguration('changelistsPlus');
   const gitPath = cfg.get<string>('gitPath') || 'git';
-  const git = new GitService(gitPath, cfg.get<number>('contextLines') ?? 3);
+  const git = new GitService(gitPath);
   // 启动清扫：清掉 >24h 的合成 diff 残留（崩溃/强退时没来得及删的）
   git.sweepSynthDir(24 * 60 * 60 * 1000);
 
@@ -55,7 +55,6 @@ export function activate(context: vscode.ExtensionContext): void {
   const detector = new ChangeDetector(
     git,
     store,
-    () => vscode.workspace.getConfiguration('changelistsPlus').get<number>('contextLines') ?? 3,
     () => vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
   );
   const provider = new ChangelistTreeProvider(detector, s);
@@ -201,8 +200,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('changelistsPlus')) {
-        const c = vscode.workspace.getConfiguration('changelistsPlus');
-        git.updateContextLines(c.get<number>('contextLines') ?? 3);
         void refreshAll();
       }
     }),

@@ -300,13 +300,6 @@
           "type": "string",
           "default": "git",
           "description": "%changelistsPlus.config.gitPath%"
-        },
-        "changelistsPlus.contextLines": {
-          "type": "number",
-          "default": 3,
-          "minimum": 0,
-          "maximum": 20,
-          "description": "%changelistsPlus.config.contextLines%"
         }
       }
     }

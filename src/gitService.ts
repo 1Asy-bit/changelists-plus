@@ -50,15 +50,7 @@ export interface GitRunOptions {
 }
 
 export class GitService {
-  private contextLines: number;
-
-  constructor(private gitPath: string, contextLines = 3) {
-    this.contextLines = contextLines;
-  }
-
-  updateContextLines(n: number): void {
-    this.contextLines = n;
-  }
+  constructor(private gitPath: string) {}
 
   run(args: string[], opts: GitRunOptions = {}): Promise<GitResult> {
     return this.runRaw(args, opts).then((r) => ({
@@ -122,6 +114,9 @@ export class GitService {
    * 统一的 diff flags：
    * - core.quotepath=false：中文/空格路径原样输出，免去 C 风格转义解析
    * - --no-ext-diff：不调用外部 diff 工具
+   * - -U0：零上下文——任何非相邻的改动（间隔 ≥1 行）都独立成 hunk（块），
+   *   可分别分配到不同 changelist（块级拆分）。git 会把间隔 < 2×contextLines
+   *   的改动合并，只有 -U0 能保证"不同行的改动"各自独立。
    * - --no-renames：重命名退化为 delete+add，与拆分模型自洽
    * - --ignore-submodules=all：子模块不产生可拆分 hunk
    */
@@ -130,7 +125,7 @@ export class GitService {
       '-c', 'core.quotepath=false',
       'diff',
       '--no-ext-diff',
-      `-U${this.contextLines}`,
+      '-U0',
       '--no-renames',
       '--ignore-submodules=all',
     ];
@@ -197,7 +192,8 @@ export class GitService {
       // 未跟踪文件：patch 是 new file mode，目标文件不能预先存在
       fs.rmSync(file, { force: true });
     }
-    const r = await this.run(['apply', '--whitespace=nowarn'], { cwd: dir, input: patch });
+    // --unidiff-zero：内部 diff 为 -U0，patch 无上下文行，git apply 默认拒绝（见 commitEngine 注释）
+    const r = await this.run(['apply', '--unidiff-zero', '--whitespace=nowarn'], { cwd: dir, input: patch });
     if (r.code !== 0) {
       return null;
     }

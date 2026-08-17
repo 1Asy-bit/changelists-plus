@@ -63,7 +63,6 @@ export class ChangeDetector extends EventEmitter {
   constructor(
     private git: GitService,
     private store: ChangelistStore,
-    private getContextLines: () => number,
     private getFolders: () => string[],
   ) {
     super();

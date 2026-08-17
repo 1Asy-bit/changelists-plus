@@ -11,6 +11,7 @@ Split the changes inside a single file across multiple changelists, then commit 
 ### Features
 
 - **Split one file's edits across changelists** — a file can appear under `default` and several changelists at the same time; new edits made after assigning automatically go back to `default`
+- **Block-level granularity** — internal diffs are zero-context (`-U0`): every non-adjacent change (≥1 line apart) is an independent block that can be assigned to a different changelist and committed separately; directly adjacent lines stay one block. Select the changed lines in the editor, right-click → *Assign Selected Changes to Changelist…* for precise per-selection assignment
 - **Per-view diff** — click a file under a changelist to open a "HEAD ⟷ HEAD + this view's changes" comparison; you see exactly what that changelist changed
 - **Partial commit** — commit only the selected changelist; the working tree is never rewritten and the remaining changes are preserved as-is
 - **Stage** — stage a changelist, selected files, or selected hunks to the index (`git apply --cached`), without touching the working tree; re-staging already-staged changes is a safe no-op
@@ -56,7 +57,6 @@ Split the changes inside a single file across multiple changelists, then commit 
 | Setting | Default | Description |
 |---|---|---|
 | `changelistsPlus.gitPath` | `git` | Path to the git executable (for non-standard installs) |
-| `changelistsPlus.contextLines` | `3` | Diff context lines; larger values merge nearby edits into a single hunk |
 
 ### Requirements
 
@@ -94,6 +94,7 @@ IDEA 风格 Changelist 的 VS Code 扩展：**把同一文件内的不同改动�
 ### 功能特性
 
 - **同文件内修改拆分**——一个文件的多次修改分属不同 Changelist；分配后再编辑产生的新修改自动回到 default，可再拖到别的 Changelist
+- **块级拆分粒度**——内部 diff 固定零上下文（`-U0`）：同一文件内**任何非相邻**的改动（间隔 ≥1 行）都是独立块，可分别分配到不同 Changelist 并单独提交；紧挨着的相邻行仍属同一块。编辑器里选中改动区域 → 右键 → *把选中改动分配到 Changelist…* 即可按选区精确分配
 - **按视图 diff**——在某个 Changelist 下点击文件，打开「HEAD ⟷ HEAD+该视图修改」对比视图，只看到该 Changelist 改了什么
 - **只提交选中的 Changelist**——`git log` 只含该 Changelist 的改动，工作区零改写，剩余改动原样保留
 - **暂存（Stage）**——把 Changelist、选中文件或 hunks 暂存到 index（`git apply --cached`），工作区不动；重复暂存已暂存的改动是安全的幂等操作
@@ -139,7 +140,6 @@ IDEA 风格 Changelist 的 VS Code 扩展：**把同一文件内的不同改动�
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `changelistsPlus.gitPath` | `git` | git 可执行文件路径（非标准安装时设置） |
-| `changelistsPlus.contextLines` | `3` | diff 上下文行数；越大，相距越近的改动越会被合并成同一个 hunk |
 
 ### 环境要求
 

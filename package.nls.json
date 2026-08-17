@@ -15,6 +15,5 @@
   "changelistsPlus.command.discardFile": "Discard Changes",
   "changelistsPlus.command.moveToChangelist": "Move to Changelist…",
   "changelistsPlus.command.assignSelection": "Assign Selected Changes to Changelist…",
-  "changelistsPlus.config.gitPath": "Path to the git executable (default: \"git\")",
-  "changelistsPlus.config.contextLines": "Number of context lines used when computing diffs"
+  "changelistsPlus.config.gitPath": "Path to the git executable (default: \"git\")"
 }

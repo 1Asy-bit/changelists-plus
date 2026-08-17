@@ -33,6 +33,15 @@ import { matchFileHunks, StoredHunk } from './matching';
 import type { ChangelistStore } from './changelistStore';
 import type { GitService } from './gitService';
 
+/**
+ * 内部 diff 固定 -U0，序列化出的 patch 无上下文行。git apply 默认拒绝
+ * 零上下文 hunk（GNU patch 兼容性检查，且非文件末尾的 hunk 匹配不可靠），
+ * --unidiff-zero 跳过该检查、按 hunk 头行号 + 内容精确应用——git 官方
+ * 对自身生成的 -U0 patch 的建议用法。所有 apply 路径（提交/暂存/撤销）
+ * 都必须带上，否则无上下文 patch 无法应用。
+ */
+const APPLY_CACHED = ['apply', '--cached', '--whitespace=nowarn'];
+
 export type CommitError =
   | 'mergeInProgress'
   | 'unmerged'
@@ -134,7 +143,7 @@ async function commitPatchToIndex(
     if (rt.code !== 0) {
       return { ok: false, error: 'applyFailed', stderr: rt.stderr };
     }
-    const ap = await git.run(['apply', '--cached', '--whitespace=nowarn'], {
+    const ap = await git.run([...APPLY_CACHED, '--unidiff-zero'], {
       cwd: repoRoot,
       env,
       input: patch,
@@ -169,10 +178,12 @@ async function applyWithFallbacks(
   repoRoot: string,
   patch: string,
 ): Promise<{ ok: boolean; stderr: string }> {
+  // 所有阶梯都带 --unidiff-zero：内部 diff 为 -U0，patch 无上下文行，
+  // git apply 默认拒绝（GNU patch 兼容检查），该标志跳过检查、按行号精确应用
   const attempts: string[][] = [
-    ['apply', '--cached', '--whitespace=nowarn'],
-    ['apply', '--cached', '--whitespace=nowarn', '--3way'],
-    ['apply', '--cached', '--whitespace=nowarn', '--ignore-space-change', '--recount'],
+    [...APPLY_CACHED, '--unidiff-zero'],
+    [...APPLY_CACHED, '--unidiff-zero', '--3way'],
+    [...APPLY_CACHED, '--unidiff-zero', '--ignore-space-change', '--recount'],
   ];
   let stderr = '';
   for (const args of attempts) {
@@ -515,10 +526,11 @@ export async function discardViewChanges(
       return { ok: false, error: 'applyFailed', stderr: String(err) };
     }
   } else {
+    // --unidiff-zero：-U0 无上下文 patch 必需（见 APPLY_CACHED 注释）
     const attempts: string[][] = [
-      ['apply', '-R', '--whitespace=nowarn'],
-      ['apply', '-R', '--whitespace=nowarn', '--3way'],
-      ['apply', '-R', '--whitespace=nowarn', '--ignore-space-change', '--recount'],
+      ['apply', '-R', '--unidiff-zero', '--whitespace=nowarn'],
+      ['apply', '-R', '--unidiff-zero', '--whitespace=nowarn', '--3way'],
+      ['apply', '-R', '--unidiff-zero', '--whitespace=nowarn', '--ignore-space-change', '--recount'],
     ];
     let stderr = '';
     let ok = false;
@@ -535,7 +547,7 @@ export async function discardViewChanges(
     }
     // 同步 index：已暂存的 hunk 一并撤销，避免留下 stale staged 状态。
     // 未暂存的 hunk 在 index 中是 HEAD 版本，反向 patch 上下文不匹配 → 自然失败，忽略。
-    await git.run(['apply', '--cached', '-R', '--whitespace=nowarn'], {
+    await git.run(['apply', '--cached', '-R', '--unidiff-zero', '--whitespace=nowarn'], {
       cwd: repoRoot,
       input: built.patch,
     });

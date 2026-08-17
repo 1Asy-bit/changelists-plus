@@ -20,6 +20,7 @@ import {
 } from './commitEngine';
 import type { GitService } from './gitService';
 import { createHeadUri } from './headFsProvider';
+import { hunkHitsSelection } from './diffParser';
 import type { StoredHunk } from './matching';
 import type { TreeNode } from './treeView';
 import { t } from './i18n';
@@ -463,14 +464,7 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     const sel = editor.selection;
     const a = Math.min(sel.start.line, sel.end.line) + 1;
     const b = Math.max(sel.start.line, sel.end.line) + 1;
-    const hits = fm.hunks.filter((h) => {
-      if (h.hunk.newLines <= 0) {
-        return false;
-      }
-      const hs = h.hunk.newStart;
-      const he = h.hunk.newStart + h.hunk.newLines - 1;
-      return hs <= b && he >= a;
-    });
+    const hits = fm.hunks.filter((h) => hunkHitsSelection(h.hunk, a, b));
     if (hits.length === 0) {
       vscode.window.showInformationMessage(t('noChangeInSelection'));
       return;

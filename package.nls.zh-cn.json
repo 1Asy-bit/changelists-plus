@@ -15,6 +15,5 @@
   "changelistsPlus.command.discardFile": "撤销修改",
   "changelistsPlus.command.moveToChangelist": "移动到 Changelist…",
   "changelistsPlus.command.assignSelection": "把选中改动分配到 Changelist…",
-  "changelistsPlus.config.gitPath": "git 可执行文件路径（默认 \"git\"）",
-  "changelistsPlus.config.contextLines": "计算差异时使用的上下文行数"
+  "changelistsPlus.config.gitPath": "git 可执行文件路径（默认 \"git\"）"
 }

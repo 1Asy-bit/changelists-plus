@@ -132,7 +132,6 @@ function parseFileChange(lines: string[], start: number): { change: FileChange; 
       i++;
       continue;
     }
-    const header = lines[i];
     i++;
     const bodyLines: string[] = [];
     while (i < lines.length) {
@@ -144,7 +143,7 @@ function parseFileChange(lines: string[], start: number): { change: FileChange; 
         break;
       }
     }
-    hunks.push(makeHunk(filePath, header, bodyLines, m));
+    hunks.push(makeHunk(filePath, bodyLines, m));
   }
 
   return { change: { path: filePath, kind, binary, headerLines, hunks }, next: i };
@@ -152,7 +151,6 @@ function parseFileChange(lines: string[], start: number): { change: FileChange; 
 
 function makeHunk(
   filePath: string,
-  header: string,
   bodyLines: string[],
   m: RegExpExecArray,
 ): Hunk {
@@ -160,6 +158,11 @@ function makeHunk(
   const oldLines = m[2] ? Number(m[2]) : 1;
   const newStart = Number(m[3]);
   const newLines = m[4] ? Number(m[4]) : 1;
+  // git 原始 hunk 头（如 `@@ -2 +2 @@ l1`）可能带 func context 后缀。
+  // -U0 下 hunk 无上下文行，该后缀会被 git apply 当作定位线索导致错位
+  // （实验验证：带后缀的无上下文 patch 无法 apply）。统一重建为规范头：
+  // 显式逗号计数、不带后缀——只有这种头能可靠应用，且计数与内容一致。
+  const header = `@@ -${oldStart},${oldLines} +${newStart},${newLines} @@`;
   const added: string[] = [];
   const removed: string[] = [];
   for (const l of bodyLines) {
@@ -237,4 +240,27 @@ export function makeUntrackedChange(relPath: string, content: string): FileChang
 /** 粗略二进制检测：内容开头 8KB 内含 NUL 字节即视为二进制 */
 export function isBinaryContent(buf: Buffer): boolean {
   return buf.slice(0, 8192).includes(0);
+}
+
+/**
+ * hunk 是否命中编辑器选区 [a, b]（1-based 行号，new 侧坐标）。
+ * - new 侧相交：改动的新行区间（新增/替换行所在位置）
+ * - old 侧相交：删除行区间（纯删除块 newLines=0 时 new 侧为空，靠这里命中；
+ *   删除行在编辑器里不可见，用同一 [a,b] 近似删除缺口的位置）
+ * - 命中即整块分配（最小分配单元是块，不做块内子拆分）
+ */
+export function hunkHitsSelection(hunk: Hunk, a: number, b: number): boolean {
+  if (hunk.newLines > 0) {
+    const hs = hunk.newStart;
+    const he = hunk.newStart + hunk.newLines - 1;
+    if (hs <= b && he >= a) {
+      return true;
+    }
+  }
+  if (hunk.oldLines > 0) {
+    const os = hunk.oldStart;
+    const oe = hunk.oldStart + hunk.oldLines - 1;
+    return os <= b && oe >= a;
+  }
+  return false;
 }

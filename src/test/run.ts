@@ -12,6 +12,7 @@ import { ChangelistStore } from '../changelistStore';
 import {
   Hunk,
   hunkId,
+  hunkHitsSelection,
   isBinaryContent,
   makeUntrackedChange,
   parseGitDiff,
@@ -34,12 +35,13 @@ import { ChangeDetector } from '../changeDetector';
 
 const GIT = 'git';
 
-function git(dir: string, args: string[], input?: string): string {
+function git(dir: string, args: string[], input?: string, env?: NodeJS.ProcessEnv): string {
   return execFileSync(GIT, args, {
     cwd: dir,
     input: input ?? undefined,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: env ? { ...process.env, ...env } : undefined,
   });
 }
 
@@ -66,8 +68,8 @@ function commitAll(dir: string, msg: string): void {
   git(dir, ['commit', '-m', msg, '-q']);
 }
 
-function newEngine(dir: string, contextLines = 3) {
-  const gitSvc = new GitService(GIT, contextLines);
+function newEngine(dir: string) {
+  const gitSvc = new GitService(GIT);
   // store 必须放在仓库目录外：在仓库内会成为 untracked 文件，被 ls-files --others
   // 合成进 freshDiff，污染「未分配」视图（default 批量操作会把 store 文件一起提交/暂存）
   const store = new ChangelistStore(
@@ -78,14 +80,14 @@ function newEngine(dir: string, contextLines = 3) {
 
 /**
  * 两 hunk 场景：f.txt 修改 line2（A）与 line11（B），A 已分配给 changelist。
- * 改动间隔必须 > 2×contextLines，否则 git 会合并成单个 hunk。
+ * 内部 diff 固定 -U0，间隔 ≥1 行的改动各自独立成 hunk（块级拆分）。
  */
-async function setupTwoHunkScenario(contextLines = 3) {
+async function setupTwoHunkScenario() {
   const dir = makeRepo();
   writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n');
   commitAll(dir, 'init');
   writeFile(dir, 'f.txt', 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nB1\nl12\nl13\nl14\n');
-  const { gitSvc, store } = newEngine(dir, contextLines);
+  const { gitSvc, store } = newEngine(dir);
   const cl = store.createChangelist(dir, 'Feature A');
   const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
   assert.strictEqual(fc.hunks.length, 2, 'expected two separate hunks');
@@ -135,11 +137,11 @@ function test(name: string, fn: () => Promise<void> | void): void {
 test('parser: 单文件两处修改解析为两个 hunk', () => {
   const dir = makeRepo();
   try {
-    // 改动间隔必须 > 2×context(3)（间隔 = 中间未改动行数），否则两个 hunk 会合并
+    // -U0 下间隔 ≥1 行（中间有未改动行）的两处改动各自独立成块
     writeFile(dir, 'a.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\n');
     commitAll(dir, 'init');
     writeFile(dir, 'a.txt', 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nB1\nl11\n');
-    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U3', '--no-renames', 'HEAD', '--']);
+    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-renames', 'HEAD', '--']);
     const files = parseGitDiff(text);
     assert.strictEqual(files.length, 1);
     const fc = files[0];
@@ -163,7 +165,7 @@ test('parser: 新文件/删除文件/二进制', () => {
     fs.writeFileSync(path.join(dir, 'bin.dat'), Buffer.from([1, 2, 0, 3, 4]));
     // git diff 不显示未跟踪文件：先把它们加进 index（diff HEAD 仍按 HEAD 为基线）
     git(dir, ['add', '-A']);
-    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U3', '--no-renames', 'HEAD', '--']);
+    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-renames', 'HEAD', '--']);
     const files = parseGitDiff(text);
     assert.strictEqual(files.length, 3);
     const newFc = files.find((f) => f.path === 'new.txt')!;
@@ -188,13 +190,13 @@ test('parser: 无结尾换行（\\ No newline）标记保留并可重建', () =>
     writeFile(dir, 'e.txt', 'aaa\nbbb');
     commitAll(dir, 'init');
     writeFile(dir, 'e.txt', 'aaa\nBBB');
-    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U3', '--no-renames', 'HEAD', '--']);
+    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-renames', 'HEAD', '--']);
     const files = parseGitDiff(text);
     assert.strictEqual(files.length, 1);
     assert.ok(files[0].hunks[0].bodyLines.some((l) => l.startsWith('\\')));
     const patch = serializePatch(files);
     git(dir, ['read-tree', 'HEAD']);
-    git(dir, ['apply', '--cached', '--whitespace=nowarn'], patch);
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'], patch);
     const staged = git(dir, ['diff', '--cached']);
     assert.ok(staged.includes('\\ No newline at end of file'));
   } finally {
@@ -208,13 +210,13 @@ test('parser: 中文/空格路径原样解析并可 apply', () => {
     writeFile(dir, '空间 目录/中文 文件.txt', 'v1\n');
     commitAll(dir, 'init');
     writeFile(dir, '空间 目录/中文 文件.txt', 'v2\n');
-    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U3', '--no-renames', 'HEAD', '--']);
+    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-renames', 'HEAD', '--']);
     const files = parseGitDiff(text);
     assert.strictEqual(files.length, 1);
     assert.strictEqual(files[0].path, '空间 目录/中文 文件.txt');
     const patch = serializePatch(files);
     git(dir, ['read-tree', 'HEAD']);
-    git(dir, ['apply', '--cached'], patch);
+    git(dir, ['apply', '--cached', '--unidiff-zero'], patch);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -227,13 +229,13 @@ test('parser: CRLF 仓库（autocrlf=true）diff/apply 自洽', () => {
     writeFile(dir, 'crlf.txt', 'a\r\nb\r\nc\r\n');
     commitAll(dir, 'init');
     writeFile(dir, 'crlf.txt', 'a\r\nB\r\nc\r\n');
-    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U3', '--no-renames', 'HEAD', '--']);
+    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-renames', 'HEAD', '--']);
     const files = parseGitDiff(text);
     assert.strictEqual(files.length, 1);
     assert.strictEqual(files[0].hunks.length, 1);
     const patch = serializePatch(files);
     git(dir, ['read-tree', 'HEAD']);
-    git(dir, ['apply', '--cached'], patch);
+    git(dir, ['apply', '--cached', '--unidiff-zero'], patch);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -423,7 +425,7 @@ test('engine: add -p 部分 staged（只 stage B）后提交 A——B 保持 sta
   try {
     const full = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
     const bOnly = serializePatch([{ ...full, hunks: [hunkB] }]);
-    git(dir, ['apply', '--cached', '--whitespace=nowarn'], bOnly);
+    git(dir, ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'], bOnly);
     const stagedBefore = parseGitDiff(await gitSvc.diffStaged(dir));
     assert.strictEqual(stagedBefore.length, 1);
     assert.strictEqual(stagedBefore[0].hunks[0].id, hunkB.id);
@@ -644,7 +646,7 @@ test('engine: 冲突文件存在时拒绝提交', async () => {
 test('engine: restore 兜底阶梯——staged 快照与已提交内容冲突时 reset + 告警', async () => {
   // 场景：stage 整文件（A1 入 index）→ 又改 worktree 同区域（A2，紧邻行也改了）。
   // 提交 changelist（fresh 匹配到 A2）后，restore = A1 快照：
-  //  ① 原样 apply：A1 的上下文 l3 已被 A2 改动 → 失败
+  //  ① 原样 apply：-U0 无上下文，line2 已是 A2 → 内容不匹配 → 失败
   //  ② --3way：ours(HEAD+A2) 与 theirs(A1) 都改了 line2 → 冲突 → 失败
   //  ③ --recount：位置/内容都不对 → 失败 → ④ reset + warning
   const dir = makeRepo();
@@ -1066,9 +1068,9 @@ test('detector: 符号链接路径下刷新不丢文件，分配后新 hunk 回 
     return;
   }
   try {
-    const gitSvc = new GitService(GIT, 3);
+    const gitSvc = new GitService(GIT);
     const store = new ChangelistStore(storePath);
-    const det = new ChangeDetector(gitSvc, store, () => 3, () => [link]);
+    const det = new ChangeDetector(gitSvc, store, () => [link]);
     const lines = Array.from({ length: 18 }, (_, i) => `l${i + 1}`).join('\n');
     writeFile(dir, 'f.txt', lines + '\n');
     commitAll(dir, 'init');
@@ -1117,7 +1119,7 @@ test('git: headFileContent 返回 HEAD 原始字节，未跟踪返回 null', asy
   try {
     writeFile(dir, 'f.txt', 'v1\n');
     commitAll(dir, 'init');
-    const gitSvc = new GitService(GIT, 3);
+    const gitSvc = new GitService(GIT);
     const buf = await gitSvc.headFileContent(dir, 'f.txt');
     assert.ok(buf);
     assert.strictEqual(buf!.toString('utf8'), 'v1\n');
@@ -1145,7 +1147,7 @@ test('git: 文件名含 * 的通配符字符——--literal-pathspecs 回归', a
     commitAll(dir, 'init');
     writeFile(dir, 'a*b.txt', 'one\nchanged\n');
     writeFile(dir, 'axb.txt', 'two\nchanged\n');
-    const gitSvc = new GitService(GIT, 3);
+    const gitSvc = new GitService(GIT);
 
     // diffFile：修复前 glob 会同时输出 axb.txt → 文件级 path 对不上 → 视图丢文件
     const d = parseGitDiff(await gitSvc.diffFile(dir, 'a*b.txt'));
@@ -1174,7 +1176,7 @@ test('git: applyPatchToTempFile 按仓库隔离临时目录（多仓库同名文
     commitAll(dir2, 'init');
     writeFile(dir1, 'a.txt', 'repo1-head\nrepo1-mod\n');
     writeFile(dir2, 'a.txt', 'repo2-head\nrepo2-mod\n');
-    const gitSvc = new GitService(GIT, 3);
+    const gitSvc = new GitService(GIT);
 
     const p1 = parseGitDiff(await gitSvc.diffWorktree(dir1))[0];
     const p2 = parseGitDiff(await gitSvc.diffWorktree(dir2))[0];
@@ -1203,7 +1205,7 @@ test('git: sweepSynthDir 只删过期的合成 diff 临时文件', async () => {
     writeFile(dir, 'f.txt', 'l1\n');
     commitAll(dir, 'init');
     writeFile(dir, 'f.txt', 'l1\nchanged\n');
-    const gitSvc = new GitService(GIT, 3);
+    const gitSvc = new GitService(GIT);
     // 目录不存在时静默返回（无残留场景不报错）
     gitSvc.sweepSynthDir(24 * 3600 * 1000);
 
@@ -1280,6 +1282,193 @@ test('engine: 重复暂存已暂存的 hunks——幂等 no-op（优化5 回归�
       new Set(staged2[0].hunks.map((h) => h.id)),
       new Set([hunkA.id, hunkB.id]),
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ================= -U0 块级拆分 =================
+
+test('U0: 间隔 1 行的改动拆分为两个 hunk（近距拆分核心回归）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\n');
+    commitAll(dir, 'init');
+    // line2 与 line4 只隔 line3（1 行）——-U3 时代必被合并，-U0 必须拆开
+    writeFile(dir, 'f.txt', 'l1\nA\nl3\nB\nl5\n');
+    const { gitSvc, store } = newEngine(dir);
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    assert.strictEqual(fc.hunks.length, 2, 'nearby edits must be separate hunks at -U0');
+    const [block2, block4] = fc.hunks;
+    assert.strictEqual(block2.oldStart, 2);
+    assert.strictEqual(block4.oldStart, 4);
+    const cl = store.createChangelist(dir, 'CL');
+    store.setHunkOwners(
+      dir,
+      'f.txt',
+      [{ id: block2.id, oldStart: block2.oldStart, oldLines: block2.oldLines }],
+      cl.id,
+    );
+    const before = readFile(dir, 'f.txt');
+    const r = await commitChangelist({
+      git: gitSvc,
+      store,
+      repoRoot: dir,
+      changelistId: cl.id,
+      message: 'block2',
+    });
+    assert.ok(r.ok, JSON.stringify(r));
+    // HEAD 只含 line2 改动；worktree 逐字节不变；剩余 diff 只有 line4 块
+    assert.strictEqual(git(dir, ['show', 'HEAD:f.txt']), 'l1\nA\nl3\nl4\nl5\n');
+    assert.strictEqual(readFile(dir, 'f.txt'), before);
+    const rest = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    assert.strictEqual(rest.hunks.length, 1);
+    assert.strictEqual(rest.hunks[0].oldStart, 4);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('U0: 相邻行改动仍合并为单 hunk（块级拆分边界）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nA\nB\nl4\nl5\n');
+    const { gitSvc } = newEngine(dir);
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    assert.strictEqual(fc.hunks.length, 1, 'adjacent edits must stay one hunk');
+    assert.strictEqual(fc.hunks[0].oldLines, 2);
+    assert.strictEqual(fc.hunks[0].newLines, 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('parser: -U0 头部格式（无逗号计数 / 纯删除 newLines=0）与可应用性', () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\n');
+    commitAll(dir, 'init');
+    // 改 line2 + 删 line5：间隔 2 行，-U0 下各自独立成块
+    writeFile(dir, 'f.txt', 'l1\nA\nl3\nl4\n');
+    const text = git(dir, ['-c', 'core.quotepath=false', 'diff', '-U0', '--no-renames', 'HEAD', '--']);
+    const fc = parseGitDiff(text)[0];
+    assert.strictEqual(fc.hunks.length, 2);
+    const [mod, del] = fc.hunks;
+    // 单行修改：规范化头（显式计数、无 func context 后缀）
+    assert.strictEqual(mod.header, '@@ -2,1 +2,1 @@');
+    assert.strictEqual(mod.newLines, 1);
+    // 纯删除：new 侧 0 行
+    assert.strictEqual(del.header, '@@ -5,1 +4,0 @@');
+    assert.strictEqual(del.newLines, 0);
+    assert.deepStrictEqual(del.removed, ['l5']);
+    // 序列化后可应用于 read-tree HEAD 的临时 index（-U0 无上下文 patch 的提交路径）
+    const patch = serializePatch([fc]);
+    const tmpIndex = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-idx-')), 'index');
+    try {
+      git(dir, ['read-tree', 'HEAD'], undefined, { GIT_INDEX_FILE: tmpIndex });
+      git(
+        dir,
+        ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn', '-'],
+        patch,
+        { GIT_INDEX_FILE: tmpIndex },
+      );
+    } finally {
+      fs.rmSync(path.dirname(tmpIndex), { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('hunkHitsSelection: 纯删除块 old 侧命中 / 新增替换块 new 侧命中 / 部分命中整块', () => {
+  // 纯删除块：old 区间 [5,6]，new 侧为空
+  const del = makeHunk('f', ['l5', 'l6'], [], 5, 2);
+  assert.strictEqual(hunkHitsSelection(del, 5, 6), true);
+  assert.strictEqual(hunkHitsSelection(del, 3, 4), false);
+  assert.strictEqual(hunkHitsSelection(del, 1, 5), true);
+  // 替换块：new 侧 [2,2]
+  const mod = makeHunk('f', ['l2'], ['A'], 2);
+  assert.strictEqual(hunkHitsSelection(mod, 2, 2), true);
+  assert.strictEqual(hunkHitsSelection(mod, 3, 3), false);
+  // 新文件块：old 侧为空，new 侧 [1,3]
+  const add = makeHunk('f', [], ['a', 'b', 'c'], 0, 0);
+  assert.strictEqual(hunkHitsSelection(add, 1, 3), true);
+  assert.strictEqual(hunkHitsSelection(add, 4, 5), false);
+  // 相邻合并块：只选中部分行仍整块命中（整块分配语义）
+  const adj = makeHunk('f', ['l2', 'l3'], ['A', 'B'], 2, 2);
+  assert.strictEqual(hunkHitsSelection(adj, 2, 2), true);
+});
+
+test('U0 端到端: 纯删除块分配/提交，staged 快照按 id 隔离', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\n');
+    commitAll(dir, 'init');
+    // 删 line2 + 改 line5→X：两个独立块（间隔 2 行）
+    writeFile(dir, 'f.txt', 'l1\nl3\nl4\nX\n');
+    const { gitSvc, store } = newEngine(dir);
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    assert.strictEqual(fc.hunks.length, 2);
+    const delBlock = fc.hunks.find((h) => h.newLines === 0);
+    const modBlock = fc.hunks.find((h) => h.newLines > 0);
+    assert.ok(delBlock && modBlock, 'expected one deletion block and one modification block');
+    const cl = store.createChangelist(dir, 'CL');
+    store.setHunkOwners(
+      dir,
+      'f.txt',
+      [{ id: delBlock.id, oldStart: delBlock.oldStart, oldLines: delBlock.oldLines }],
+      cl.id,
+    );
+    git(dir, ['add', 'f.txt']); // 整文件暂存（含两个块）
+    const before = readFile(dir, 'f.txt');
+    const r = await commitChangelist({
+      git: gitSvc,
+      store,
+      repoRoot: dir,
+      changelistId: cl.id,
+      message: 'del',
+    });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.strictEqual(r.warning, undefined, 'restore must succeed cleanly: ' + JSON.stringify(r));
+    // HEAD 只有删除；worktree 逐字节不变；restore 后 staged 只剩 line5 块
+    assert.strictEqual(git(dir, ['show', 'HEAD:f.txt']), 'l1\nl3\nl4\nl5\n');
+    assert.strictEqual(readFile(dir, 'f.txt'), before);
+    const staged = parseGitDiff(await gitSvc.diffStaged(dir));
+    assert.strictEqual(staged.length, 1);
+    assert.strictEqual(staged[0].hunks.length, 1);
+    assert.strictEqual(staged[0].hunks[0].id, modBlock.id);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('U0 端到端: 删除块撤销（删除块 + 后续修改块共存）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nl3\nl4\nX\n');
+    const { gitSvc, store } = newEngine(dir);
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    const delBlock = fc.hunks.find((h) => h.newLines === 0);
+    assert.ok(delBlock);
+    const cl = store.createChangelist(dir, 'CL');
+    store.setHunkOwners(
+      dir,
+      'f.txt',
+      [{ id: delBlock.id, oldStart: delBlock.oldStart, oldLines: delBlock.oldLines }],
+      cl.id,
+    );
+    const r = await discardChangelist(gitSvc, store, dir, cl.id);
+    assert.ok(r.ok, JSON.stringify(r));
+    // 删除块被撤销（l2 恢复），修改块保留（line5 仍是 X）
+    assert.strictEqual(readFile(dir, 'f.txt'), 'l1\nl2\nl3\nl4\nX\n');
+    const rest = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    assert.strictEqual(rest.hunks.length, 1);
+    assert.strictEqual(rest.hunks[0].newLines, 1);
+    assert.strictEqual(store.recordsWithOwner(dir, 'f.txt').length, 0);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
