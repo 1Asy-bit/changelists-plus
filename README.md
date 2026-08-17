@@ -67,20 +67,6 @@ Split the changes inside a single file across multiple changelists, then commit 
 
 Everything stays **local**. Changelist data is stored under VS Code's workspace storage, keyed per repository root (atomic writes, automatic corruption backup). No network access, no telemetry, no analytics — git is the only external command executed.
 
-### Release Notes
-
-**0.2.8** — repository metadata added for the marketplace listing (Source / Issues links).
-
-**0.2.7** — discard a whole changelist's changes from its row (right-click + inline icon).
-
-**0.2.6** — marketplace-ready README (English / 简体中文) and changelog; Windows path-case hardening.
-
-**0.2.5** — idempotent re-staging (no more "changes changed" errors); discard now also syncs the index; fixes for file names containing `* ? [` characters, per-repo temp-file isolation, and staged-state preservation when committing from `default`.
-
-**0.2.x** — per-view diff, stage support, inline file/changelist action icons, `default` node batch operations, view renamed to "Changelists", extension icon.
-
-Full history: [CHANGELOG.md](CHANGELOG.md)
-
 ### License
 
 MIT
@@ -149,20 +135,6 @@ IDEA 风格 Changelist 的 VS Code 扩展：**把同一文件内的不同改动�
 ### 隐私与数据
 
 所有数据都保存在**本地**。Changelist 数据存放在 VS Code 的 workspace storage 下，按仓库根目录分 key（原子写入、损坏自动备份恢复）。不联网、无遥测、无统计——唯一的系统调用是 git。
-
-### 更新记录
-
-**0.2.8** —— 补充仓库元数据（市场详情页 Source / Issues 链接）。
-
-**0.2.7** —— Changelist 行新增"撤销改动"操作（右键 + 行内图标，位于删除之前），一键撤销该 Changelist 下全部改动。
-
-**0.2.6** —— 市场版中英双语 README 与变更记录；Windows 路径大小写兼容加固。
-
-**0.2.5** —— 重复暂存变为幂等操作（不再报"改动已经变化"）；撤销时同步清理暂存区；修复文件名含 `* ? [` 字符、多仓库临时文件互踩、提交 default 时暂存状态丢失等问题。
-
-**0.2.x** —— 按视图 diff、暂存功能、文件/Changelist 行内操作图标、default 节点批量操作、视图更名为 "Changelists"、扩展图标。
-
-完整变更记录：[CHANGELOG.md](CHANGELOG.md)
 
 ### 许可证
 
