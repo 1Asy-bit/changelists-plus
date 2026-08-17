@@ -35,9 +35,12 @@ export function matchFileHunks(current: Hunk[], stored: StoredHunk[]): MatchResu
   }
 
   // pass 1：内容哈希匹配
+  // 同一 id = 同一内容改动，可出现在文件多处（用户把两处相同改动分给同一 changelist
+  // 时 setHunkOwners 按 id 合并成一条记录）——一条记录共享给所有同 id 当前 hunk，
+  // 不独占（used 只约束 pass 2 对【不同 id】记录的消耗）。
   for (let i = 0; i < current.length; i++) {
     const c = current[i];
-    const candidates = (byId.get(c.id) ?? []).filter((s) => !used.has(s));
+    const candidates = byId.get(c.id) ?? [];
     if (candidates.length === 0) {
       continue;
     }
@@ -59,6 +62,11 @@ export function matchFileHunks(current: Hunk[], stored: StoredHunk[]): MatchResu
     const c = current[i];
     const window = Math.max(20, Math.round(0.2 * Math.max(c.oldLines, 1)));
     const candidates = remaining.filter((s) => {
+      // 已在本轮被其他 hunk 消耗（pass 1 或 pass 2 前序）的记录不再复用，
+      // 避免同一条记录匹配两个拆分后的 hunk（位置回写互相覆盖、分配摇摆）
+      if (used.has(s)) {
+        return false;
+      }
       if (Math.abs(s.oldStart - c.oldStart) > window) {
         return false;
       }

@@ -5,7 +5,7 @@
  */
 import * as vscode from 'vscode';
 import * as path from 'path';
-import type { ChangeDetector } from './changeDetector';
+import { realpathSafe, type ChangeDetector } from './changeDetector';
 import type { ChangelistStore } from './changelistStore';
 import {
   buildFilePatch,
@@ -108,7 +108,11 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     }
     const result = await discardViewChanges(deps.git, deps.store, n.repoRoot, n.filePath, view);
     if (result.ok) {
-      vscode.window.showInformationMessage(t('discardSuccess', result.count));
+      if (result.warning) {
+        vscode.window.showWarningMessage(t(result.warning));
+      } else {
+        vscode.window.showInformationMessage(t('discardSuccess', result.count));
+      }
     } else {
       if (result.stderr) {
         deps.output.appendLine(result.stderr);
@@ -312,7 +316,11 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     }
     const result = await discardUnassigned(deps.git, deps.store, repo.repoRoot);
     if (result.ok) {
-      vscode.window.showInformationMessage(t('discardSuccess', result.count));
+      if (result.warning) {
+        vscode.window.showWarningMessage(t(result.warning));
+      } else {
+        vscode.window.showInformationMessage(t('discardSuccess', result.count));
+      }
     } else {
       if (result.stderr) {
         deps.output.appendLine(result.stderr);
@@ -341,7 +349,11 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     }
     const result = await discardChangelist(deps.git, deps.store, cl.repoRoot, cl.id);
     if (result.ok) {
-      vscode.window.showInformationMessage(t('discardSuccess', result.count));
+      if (result.warning) {
+        vscode.window.showWarningMessage(t(result.warning));
+      } else {
+        vscode.window.showInformationMessage(t('discardSuccess', result.count));
+      }
     } else {
       if (result.stderr) {
         deps.output.appendLine(`[${cl.name}] ${result.stderr}`);
@@ -426,11 +438,18 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       vscode.window.showInformationMessage(t('noAssignableHunks'));
       return;
     }
-    const targetId = await chooseTarget(deps, items[0].repoRoot);
-    if (targetId === undefined) {
-      return; // 用户取消
+    // 跨仓库多选：targetId 属于具体仓库（changelist 按 repoRoot 存储），
+    // 每个仓库单独选目标，全部确认后才应用——避免其他仓库收到"幽灵 changelist id"孤儿数据
+    const targets = new Map<string, string | null>();
+    for (const repoRoot of records.keys()) {
+      const targetId = await chooseTarget(deps, repoRoot);
+      if (targetId === undefined) {
+        return; // 用户取消：尚未应用任何分配
+      }
+      targets.set(repoRoot, targetId);
     }
     for (const [repoRoot, byPath] of records) {
+      const targetId = targets.get(repoRoot)!;
       for (const [filePath, recs] of byPath) {
         deps.store.setHunkOwners(repoRoot, filePath, recs, targetId);
       }
@@ -454,7 +473,12 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       vscode.window.showInformationMessage(t('noGitRepo'));
       return;
     }
-    const rel = path.relative(repoRoot, editor.document.uri.fsPath).split(path.sep).join('/');
+    // repoRoot 是 git 的 realpath，fsPath 是用户视角路径（macOS /tmp → /private/tmp 符号链接），
+    // 不归一则 path.relative 得出 ../ 错误相对路径 → 误报"没有命中改动"（见 refreshFile 同款处理）
+    const rel = path
+      .relative(repoRoot, realpathSafe(editor.document.uri.fsPath))
+      .split(path.sep)
+      .join('/');
     const model = deps.detector.getModel(repoRoot);
     const fm = model?.files.find((f) => f.change.path === rel);
     if (!fm || fm.change.binary) {

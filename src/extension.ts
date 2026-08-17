@@ -151,16 +151,19 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // ---- .git 事件（提交/分支变化）→ 防抖全量刷新 ----
-  // commit 更新的是 refs（分离 HEAD 才动 HEAD），两者都要监听
+  // ---- git 事件（提交/分支变化）→ 防抖全量刷新 ----
+  // commit 更新的是 refs（分离 HEAD 才动 HEAD），两者都要监听。
+  // 分隔符无关匹配：Windows 的 fsPath 用 \（CLAUDE.md 跨平台要求），
+  // 直接用 git 返回的路径不引入平台假设，正则同时接受 / 与 \。
   let gitEventTimer: NodeJS.Timeout | undefined;
   const onGitEvent = (uri: vscode.Uri): void => {
     const p = uri.fsPath;
     const isRelevant =
-      /(^|\/)HEAD$/.test(p) ||
-      /(^|\/)index$/.test(p) ||
-      /(^|\/)packed-refs$/.test(p) ||
-      p.includes('/refs/');
+      /(^|[\\/])HEAD$/.test(p) ||
+      /(^|[\\/])index$/.test(p) ||
+      /(^|[\\/])packed-refs$/.test(p) ||
+      p.includes('/refs/') ||
+      p.includes('\\refs\\');
     if (!isRelevant) {
       return;
     }
@@ -172,14 +175,25 @@ export function activate(context: vscode.ExtensionContext): void {
       void refreshAll();
     }, 500);
   };
-  const setupWatchers = (): void => {
+  /**
+   * 监听真实 git 目录（`git rev-parse --git-dir`）而非假设 `.git` 是目录：
+   * linked worktree / 子模块的 `.git` 是指针文件（内容指向真实 gitdir），
+   * `.git/**` glob 匹配不到任何东西 → 提交/切分支后视图永不刷新。
+   * gitdir 不在 workspace 内时 VS Code watcher 不生效（平台限制），维持现状。
+   */
+  const setupWatchers = async (): Promise<void> => {
     for (const w of watchers) {
       w.dispose();
     }
     watchers.length = 0;
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const g = await git.getGitDir(folder.uri.fsPath);
+      const gitDir = g && path.isAbsolute(g) ? g : g ? path.join(folder.uri.fsPath, g) : null;
+      // gitdir 解析失败（非仓库目录）：回退旧行为，`.git/**` 匹配不到时无害
       const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(folder, '.git/**'),
+        gitDir
+          ? new vscode.RelativePattern(gitDir, '**/*')
+          : new vscode.RelativePattern(folder, '.git/**'),
       );
       watcher.onDidCreate(onGitEvent);
       watcher.onDidChange(onGitEvent);
@@ -188,7 +202,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
   const watchers: vscode.FileSystemWatcher[] = [];
-  setupWatchers();
+  void setupWatchers();
   context.subscriptions.push(
     ...watchers,
     vscode.workspace.onDidChangeWorkspaceFolders(() => {

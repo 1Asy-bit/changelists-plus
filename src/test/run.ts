@@ -1741,6 +1741,168 @@ test('staged: unborn HEAD 仓库 refreshAll 不崩（diff --cached 对比空树�
   }
 });
 
+// ================= F1/F5 坐标回归（审核修复：纯插入 hunk 无内容锚点，坐标必须换算） =================
+
+test('engine: F1 坐标——stage 下方插入 hunk，上方未暂存插入不偏移', async () => {
+  const dir = makeRepo();
+  try {
+    // HEAD 10 行；worktree 在 l2 后插 A1（hunk A，未暂存）、l5 后插 B1（hunk B，要 stage）
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nl2\nA1\nl3\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n');
+    const { gitSvc, store } = newEngine(dir);
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    assert.strictEqual(fc.hunks.length, 2);
+    const hunkB = fc.hunks[1];
+    const r = await stageRecords(
+      gitSvc,
+      dir,
+      new Map([['f.txt', [{ id: hunkB.id, oldStart: hunkB.oldStart, oldLines: hunkB.oldLines }]]]),
+    );
+    assert.ok(r.ok, JSON.stringify(r));
+    // 修复前 B 的 fresh newStart=7 含 A 的行 → B1 插到 l6 后（静默错位）；修复后须紧跟 l5
+    assert.strictEqual(
+      git(dir, ['show', ':f.txt']),
+      'l1\nl2\nl3\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n',
+      'B1 应插在 l5 后（F1 坐标修复）',
+    );
+    // worktree 不动
+    assert.strictEqual(readFile(dir, 'f.txt'), 'l1\nl2\nA1\nl3\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('engine: F1 坐标——上方已暂存插入不重复修正（两侧都在）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nl2\nA1\nl3\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n');
+    const { gitSvc, store } = newEngine(dir);
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    const [hunkA, hunkB] = fc.hunks;
+    // 先 stage A（fresh 坐标即可，index 与 worktree 一致）
+    const s1 = await stageRecords(
+      gitSvc,
+      dir,
+      new Map([['f.txt', [{ id: hunkA.id, oldStart: hunkA.oldStart, oldLines: hunkA.oldLines }]]]),
+    );
+    assert.ok(s1.ok, JSON.stringify(s1));
+    // 再 stage B：A 已暂存 → B 的 fresh 坐标 7 已含 A 的行，不应再减
+    const s2 = await stageRecords(
+      gitSvc,
+      dir,
+      new Map([['f.txt', [{ id: hunkB.id, oldStart: hunkB.oldStart, oldLines: hunkB.oldLines }]]]),
+    );
+    assert.ok(s2.ok, JSON.stringify(s2));
+    assert.strictEqual(
+      git(dir, ['show', ':f.txt']),
+      'l1\nl2\nA1\nl3\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n',
+      'B1 应插在 l5 后',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('engine: F5A 坐标——stage B 后提交上方未暂存 hunk A，restore B 不偏移', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nl2\nA1\nl3\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n');
+    const { gitSvc, store } = newEngine(dir);
+    const cl = store.createChangelist(dir, 'C1');
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    const [hunkA, hunkB] = fc.hunks;
+    // A 归入 C1（不 stage）；B 单独 stage
+    store.setHunkOwners(
+      dir,
+      'f.txt',
+      [{ id: hunkA.id, oldStart: hunkA.oldStart, oldLines: hunkA.oldLines }],
+      cl.id,
+    );
+    const s = await stageRecords(
+      gitSvc,
+      dir,
+      new Map([['f.txt', [{ id: hunkB.id, oldStart: hunkB.oldStart, oldLines: hunkB.oldLines }]]]),
+    );
+    assert.ok(s.ok, JSON.stringify(s));
+    const c = await commitChangelist({ git: gitSvc, store, repoRoot: dir, changelistId: cl.id, message: 'A' });
+    assert.ok(c.ok, JSON.stringify(c));
+    // restore 后 index = 新 HEAD + B1（l5 后）。修复前 B 的 diffStaged 坐标
+    // （index 视角，不含 A 的行）应用到新 HEAD 会插到 l4/l5 之间
+    assert.strictEqual(
+      git(dir, ['show', ':f.txt']),
+      'l1\nl2\nA1\nl3\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n',
+      'restore 后 B1 应插在 l5 后（F5A 坐标修复）',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('engine: F5B 新文件——stage 后继续编辑再提交，restore 跳过旧版不失败', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\n');
+    commitAll(dir, 'init');
+    // 新文件 u.txt 5 行，git add（stage 5 行版）
+    writeFile(dir, 'u.txt', 'u1\nu2\nu3\nu4\nu5\n');
+    git(dir, ['add', 'u.txt']);
+    // 再编辑加第 6 行 → fresh 中 u.txt 为 6 行 new-file（id 与 staged 版不同）
+    writeFile(dir, 'u.txt', 'u1\nu2\nu3\nu4\nu5\nu6\n');
+    const { gitSvc, store } = newEngine(dir);
+    const cl = store.createChangelist(dir, 'C');
+    const fresh = parseGitDiff(await gitSvc.diffWorktree(dir));
+    const uFc = fresh.find((f) => f.path === 'u.txt')!;
+    assert.strictEqual(uFc.kind, 'new');
+    store.setHunkOwners(dir, 'u.txt', [{ id: uFc.hunks[0].id, oldStart: 0, oldLines: 0 }], cl.id);
+    const c = await commitChangelist({ git: gitSvc, store, repoRoot: dir, changelistId: cl.id, message: 'add u' });
+    assert.ok(c.ok, JSON.stringify(c));
+    // 6 行版进 HEAD；旧 staged 5 行版被跳过恢复，index 对齐新 HEAD 无残留
+    assert.strictEqual(git(dir, ['show', 'HEAD:u.txt']), 'u1\nu2\nu3\nu4\nu5\nu6\n');
+    assert.strictEqual(await gitSvc.diffStaged(dir), '');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('engine: F1 坐标——混合 hunk（删除+插入同 patch）不偏移', async () => {
+  const dir = makeRepo();
+  try {
+    // HEAD 10 行；worktree 删 l3（hunk D）并在 l5 后插 B1（hunk B），两个都 stage
+    writeFile(dir, 'f.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nl2\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n');
+    const { gitSvc, store } = newEngine(dir);
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    assert.strictEqual(fc.hunks.length, 2);
+    const [hunkD, hunkB] = fc.hunks;
+    assert.ok(hunkD.oldLines === 1 && hunkD.added.length === 0, 'D 应为纯删除');
+    const r = await stageRecords(
+      gitSvc,
+      dir,
+      new Map([
+        ['f.txt', [
+          { id: hunkD.id, oldStart: hunkD.oldStart, oldLines: hunkD.oldLines },
+          { id: hunkB.id, oldStart: hunkB.oldStart, oldLines: hunkB.oldLines },
+        ]],
+      ]),
+    );
+    assert.ok(r.ok, JSON.stringify(r));
+    // 删除 hunk 有内容锚点 git 自动偏移；插入 hunk 坐标须换算（fresh newStart 含删除的 net=-1）
+    assert.strictEqual(
+      git(dir, ['show', ':f.txt']),
+      'l1\nl2\nl4\nl5\nB1\nl6\nl7\nl8\nl9\nl10\n',
+      'l3 删除、B1 紧跟 l5（坐标修复）',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ================= 主入口 =================
 
 async function main(): Promise<void> {

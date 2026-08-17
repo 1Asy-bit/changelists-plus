@@ -290,8 +290,10 @@ export class ChangelistDragAndDrop implements vscode.TreeDragAndDropController<T
       return;
     }
     let targetId: string | null;
+    let targetName = '';
     if (target && target.kind === 'changelist') {
       targetId = target.changelistId ?? null;
+      targetName = target.label;
     } else if (!target || target.kind === 'unassigned') {
       targetId = null;
     } else {
@@ -303,6 +305,12 @@ export class ChangelistDragAndDrop implements vscode.TreeDragAndDropController<T
       view: string;
     }>;
     for (const p of payloads) {
+      // 跨仓库拖拽：changelist 按仓库存储，目标 id 在其他仓库不存在时
+      // 自动创建同名 changelist（IDEA 式行为），避免写入"幽灵 changelist id"孤儿数据
+      let id = targetId;
+      if (id !== null && !this.store.changelistsOf(p.repoRoot).some((c) => c.id === id)) {
+        id = this.store.createChangelist(p.repoRoot, targetName).id;
+      }
       const model = this.detector.getModel(p.repoRoot);
       const f = model?.files.find((fm) => fm.change.path === p.filePath);
       const records = f
@@ -311,7 +319,7 @@ export class ChangelistDragAndDrop implements vscode.TreeDragAndDropController<T
             .map((h) => ({ id: h.hunk.id, oldStart: h.hunk.oldStart, oldLines: h.hunk.oldLines }))
         : [];
       if (records.length > 0) {
-        this.store.setHunkOwners(p.repoRoot, p.filePath, records, targetId);
+        this.store.setHunkOwners(p.repoRoot, p.filePath, records, id);
       }
     }
     this.onAssign();

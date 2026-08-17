@@ -125,13 +125,29 @@ async function commitPatchToIndex(
   // ---- 4. restore_patch = 已有 staged 状态 剔除 C 的 hunks ----
   const staged = parseGitDiff(await git.diffStaged(repoRoot));
   const restoreFiles: FileChange[] = [];
+  let skipNewFile = false;
   for (const fc of staged) {
     const committed = committedIds.get(fc.path);
+    if (fc.kind === 'new' && committed) {
+      // 该文件已被本次提交写进新 HEAD。若旧 staged 版本与提交版本内容不同
+      // （stage 后又编辑再提交），恢复旧版会与已存在文件冲突导致 restore 失败，
+      // 且恢复出的内容也已过时——直接跳过，staged 状态由 reset 自然清空。
+      // 版本一致时 keep 过滤已剔除，此处只兜住内容变化的场景。
+      if (fc.hunks.length > 0 && !committed.has(fc.hunks[0].id)) {
+        skipNewFile = true;
+      }
+      continue;
+    }
     const keep = fc.hunks.filter((h) => !committed?.has(h.id));
     if (keep.length > 0) {
       restoreFiles.push({ ...fc, hunks: keep });
     }
   }
+  // F5A：restore 应用目标是新 HEAD（含被提交 hunks），与 diffStaged 的 index
+  // 坐标不一致时纯插入 hunk 会静默错位——重跑 fresh 拿被提交 hunk 的内容修正。
+  // fresh 与 build 时可能隔了几毫秒（hunk id 理论上会变），修正失效时退化为
+  // 原行为（错位），不影响提交本身。
+  fixRestoreInsertionCoords(await freshDiff(git, repoRoot), staged, committedIds, restoreFiles);
   const restorePatch = serializePatch(restoreFiles);
 
   // ---- 5. 临时 index 提交 ----
@@ -162,6 +178,9 @@ async function commitPatchToIndex(
   // ---- 6. 对齐真实 index ----
   await git.run(['reset', '-q'], { cwd: repoRoot });
   let warning: string | undefined;
+  if (skipNewFile) {
+    warning = 'restoreFailed'; // 部分 staged 状态未恢复（new-file 已被提交，语义无害）
+  }
   if (restorePatch.trim().length > 0) {
     const applied = await applyWithFallbacks(git, repoRoot, restorePatch);
     if (!applied.ok) {
@@ -193,7 +212,141 @@ async function applyWithFallbacks(
     }
     stderr = r.stderr;
   }
+  // --3way 阶梯失败时 git 会把冲突文件标记为 UU 并部分写入真实 index
+  // （实验验证：exit=1 但 index 已被污染，后续 diff/apply 都看到脏状态）。
+  // 只重置冲突路径清理污染，不碰其他文件的已暂存状态。
+  await resetUnmergedPaths(git, repoRoot);
   return { ok: false, stderr };
+}
+
+/** 把 index 中未合并（3way 冲突残留的 UU）路径重置回 HEAD，清除 apply 污染 */
+async function resetUnmergedPaths(git: GitService, repoRoot: string): Promise<void> {
+  const r = await git.run(['ls-files', '-u', '-z'], { cwd: repoRoot });
+  if (r.code !== 0 || !r.stdout.trim()) {
+    return;
+  }
+  const paths: string[] = [];
+  for (const entry of r.stdout.split('\0')) {
+    if (!entry) {
+      continue;
+    }
+    // 格式：<mode> <object> <stage>\t<path>（-z 下条目间以 NUL 分隔）
+    const m = /^\S+ \S+ \S+\t(.*)$/.exec(entry);
+    if (m) {
+      paths.push(m[1]);
+    }
+  }
+  if (paths.length === 0) {
+    return;
+  }
+  // 文件名含 * ? [ 时按字面处理（同 diffFile 的 literalPathspec 思路）
+  await git.run(['reset', '-q', '--', ...paths.map((p) => ':(literal)' + p)], { cwd: repoRoot });
+}
+
+/**
+ * 修正暂存 patch 中纯插入 hunk（oldLines=0）的 newStart（stage 场景）。
+ *
+ * git apply 对 oldLines=0 的 hunk 没有内容锚点：不做内容校验、直接按 hunk 头
+ * newStart 行前插入，位置错了也是 exit=0 的静默错位（实验验证）。fresh diff 的
+ * newStart 是 worktree 坐标（含所有未提交 hunks），而 apply 目标是 index（只含
+ * 已暂存 hunks）——上方「未暂存且不在本次 patch 内」的 hunk 行只在 worktree 有、
+ * index 没有，插入点会偏掉其 (newLines - oldLines) 行，需要减掉：
+ * - 已暂存 hunks：index 中有 → 两侧坐标一致，不偏移
+ * - patch 内前序 hunks：git apply 按应用前序 hunk 后的内容定位，自动累计
+ * - 删除/修改 hunk（oldLines>0）：有 '-' 内容行做锚点，git 自动偏移搜索，无需修正
+ */
+function fixStageInsertionCoords(
+  fresh: FileChange[],
+  chosenIdsByPath: ReadonlyMap<string, ReadonlySet<string>>,
+  stagedIdsByPath: ReadonlyMap<string, ReadonlySet<string>>,
+): void {
+  for (const fc of fresh) {
+    const chosen = chosenIdsByPath.get(fc.path);
+    if (!chosen) {
+      continue;
+    }
+    const staged = stagedIdsByPath.get(fc.path);
+    for (const h of fc.hunks) {
+      if (h.oldLines !== 0 || !chosen.has(h.id)) {
+        continue;
+      }
+      let offset = 0;
+      for (const u of fc.hunks) {
+        if (u.oldStart > h.oldStart) {
+          break; // fc.hunks 按文件顺序排列（oldStart 非降序）
+        }
+        if (u === h) {
+          continue;
+        }
+        if (staged?.has(u.id)) {
+          continue; // 已暂存：index 两侧都有
+        }
+        if (chosen.has(u.id)) {
+          continue; // 本次 patch 内：git apply 自动累计
+        }
+        offset += u.newLines - u.oldLines;
+      }
+      if (offset !== 0) {
+        h.header = `@@ -${h.oldStart},${h.oldLines} +${h.newStart - offset},${h.newLines} @@`;
+      }
+    }
+  }
+}
+
+/**
+ * 修正 restore_patch 中纯插入 hunk 的 newStart（提交后恢复暂存）。
+ * restore_patch 基线是 diffStaged（index 坐标），应用目标是新 HEAD
+ * （HEAD + 被提交 hunks）。「被提交且未暂存」的 hunk（用户没 stage 就提交了它）
+ * 的行只存在于新 HEAD，插入点需后移其 (newLines - oldLines)：
+ * - 已暂存后提交的：index 与新 HEAD 都有 → 两侧坐标一致
+ * - patch 内前序 hunk（restore 保留的）：git apply 自动累计
+ * - 删除/修改 hunk：有内容锚点，git 自动偏移，无需修正
+ */
+function fixRestoreInsertionCoords(
+  fresh: FileChange[],
+  staged: FileChange[],
+  committedIds: ReadonlyMap<string, ReadonlySet<string>>,
+  restoreFiles: FileChange[],
+): void {
+  for (const rc of restoreFiles) {
+    if (rc.kind === 'new') {
+      continue; // 新文件整体处理（或跳过），无坐标问题
+    }
+    const committed = committedIds.get(rc.path);
+    if (!committed) {
+      continue;
+    }
+    const stagedFc = staged.find((s) => s.path === rc.path);
+    const freshFc = fresh.find((f) => f.path === rc.path);
+    if (!stagedFc || !freshFc) {
+      continue;
+    }
+    const restoredIds = new Set(rc.hunks.map((h) => h.id));
+    for (const h of rc.hunks) {
+      if (h.oldLines !== 0) {
+        continue;
+      }
+      let offset = 0;
+      for (const u of freshFc.hunks) {
+        if (u.oldStart > h.oldStart) {
+          break; // freshFc.hunks 按文件顺序排列（oldStart 非降序）
+        }
+        if (!committed.has(u.id)) {
+          continue; // 未提交：不在新 HEAD，不偏移
+        }
+        if (stagedFc.hunks.some((s) => s.id === u.id)) {
+          continue; // 已暂存后提交：新 HEAD 与 index 都有，坐标一致
+        }
+        if (restoredIds.has(u.id)) {
+          continue; // patch 内前序：git apply 自动累计
+        }
+        offset += u.newLines - u.oldLines;
+      }
+      if (offset !== 0) {
+        h.header = `@@ -${h.oldStart},${h.oldLines} +${h.newStart + offset},${h.newLines} @@`;
+      }
+    }
+  }
 }
 
 /** 守卫：merge/rebase/cherry-pick 状态、未解决冲突、空仓库（unborn HEAD） */
@@ -402,6 +555,7 @@ export async function stageRecords(
     wantByPath.set(p, new Set(recs.map((r) => r.id)));
   }
   const patchFiles: FileChange[] = [];
+  const chosenIdsByPath = new Map<string, Set<string>>();
   let stagedCount = 0;
   for (const fc of fresh) {
     const wantIds = wantByPath.get(fc.path);
@@ -412,6 +566,7 @@ export async function stageRecords(
     const chosen = fc.hunks.filter((h) => wantIds.has(h.id) && !stagedIds?.has(h.id));
     if (chosen.length > 0) {
       patchFiles.push({ ...fc, hunks: chosen });
+      chosenIdsByPath.set(fc.path, new Set(chosen.map((h) => h.id)));
       stagedCount += chosen.length;
     }
   }
@@ -419,6 +574,9 @@ export async function stageRecords(
     // 全部已暂存：幂等成功（区别于"没有可暂存的改动"）
     return { ok: true, stagedCount: 0 };
   }
+  // F1：fresh 坐标含所有 worktree 改动，apply 目标是 index（只含已暂存）——
+  // 纯插入 hunk 的 newStart 修正，否则上方未暂存改动会让插入点静默错位
+  fixStageInsertionCoords(fresh, chosenIdsByPath, stagedIdsByPath);
   const applied = await applyWithFallbacks(git, repoRoot, serializePatch(patchFiles));
   if (!applied.ok) {
     return { ok: false, error: 'applyFailed', stderr: applied.stderr };
@@ -487,7 +645,7 @@ export async function stageChangelist(opts: {
 export type DiscardError = 'mergeInProgress' | 'unmerged' | 'noHead' | 'empty' | 'applyFailed';
 
 export type DiscardResult =
-  | { ok: true; count: number }
+  | { ok: true; count: number; warning?: string }
   | { ok: false; error: DiscardError; stderr?: string };
 
 /**
@@ -547,10 +705,20 @@ export async function discardViewChanges(
     }
     // 同步 index：已暂存的 hunk 一并撤销，避免留下 stale staged 状态。
     // 未暂存的 hunk 在 index 中是 HEAD 版本，反向 patch 上下文不匹配 → 自然失败，忽略。
-    await git.run(['apply', '--cached', '-R', '--unidiff-zero', '--whitespace=nowarn'], {
+    const sync = await git.run(['apply', '--cached', '-R', '--unidiff-zero', '--whitespace=nowarn'], {
       cwd: repoRoot,
       input: built.patch,
     });
+    if (sync.code !== 0) {
+      // F6：失败可能是"已暂存的同 hunk 未能移除"（stale 残留）。用 diffStaged
+      // 复核——patch 中还有 hunk 留在 index 才警告，纯未暂存场景的失败是预期的。
+      const leftover = parseGitDiff(await git.diffStaged(repoRoot)).find((f) => f.path === relPath);
+      const leftoverIds = new Set(leftover?.hunks.map((h) => h.id) ?? []);
+      const patchIds = parseGitDiff(built.patch).flatMap((f) => f.hunks.map((h) => h.id));
+      if (patchIds.some((id) => leftoverIds.has(id))) {
+        return { ok: true, count: built.count, warning: 'discardStagedSyncFailed' };
+      }
+    }
   }
   if (built.recordIds.length > 0) {
     store.removeRecords(repoRoot, relPath, built.recordIds);

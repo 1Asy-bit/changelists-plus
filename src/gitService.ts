@@ -105,6 +105,19 @@ export class GitService {
     return root || null;
   }
 
+  /**
+   * 真实 git 目录（rev-parse --git-dir）。
+   * 普通仓库返回相对路径（`.git`），linked worktree / 子模块返回绝对路径
+   * （它们的 `.git` 是指针文件，指向真实 gitdir）。非仓库 → null。
+   */
+  async getGitDir(cwd: string): Promise<string | null> {
+    const r = await this.run(['rev-parse', '--git-dir'], { cwd });
+    if (r.code !== 0) {
+      return null;
+    }
+    return r.stdout.trim() || null;
+  }
+
   async headExists(repoRoot: string): Promise<boolean> {
     const r = await this.run(['rev-parse', '-q', '--verify', 'HEAD'], { cwd: repoRoot });
     return r.code === 0;

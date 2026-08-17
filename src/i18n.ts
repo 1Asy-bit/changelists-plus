@@ -55,6 +55,7 @@ const zh: Record<string, string> = {
   discardChangelistConfirm: '撤销 Changelist "{0}" 下全部修改？此操作会改写文件内容；其他 Changelist 与 default 的修改不受影响。',
   discardConfirmAction: '撤销',
   discardSuccess: '已撤销 {0} 处修改',
+  discardStagedSyncFailed: '已撤销工作区改动，但 index 中部分已暂存状态同步失败，可能残留（可用 git reset 清理）',
 };
 
 const en: Record<string, string> = {
@@ -108,6 +109,7 @@ const en: Record<string, string> = {
   discardChangelistConfirm: 'Discard all changes in changelist "{0}"? This rewrites files; changes in other changelists and default stay.',
   discardConfirmAction: 'Discard',
   discardSuccess: 'Discarded {0} change(s)',
+  discardStagedSyncFailed: 'Worktree changes discarded, but syncing the staged state failed; stale entries may remain (use git reset to clean up)',
 };
 
 let lang: 'zh' | 'en' = 'en';
