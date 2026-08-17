@@ -32,6 +32,8 @@ export interface CommandDeps {
   refreshAll: () => Promise<void>;
   /** 当前活动仓库（活动编辑器所在仓库，否则第一个） */
   activeRepo: () => Promise<{ repoRoot: string } | undefined>;
+  /** 登记新创建的合成临时文件（diff 视图关闭时由扩展层自动清理） */
+  trackTempFile: (path: string) => void;
 }
 
 export function registerCommands(context: vscode.ExtensionContext, deps: CommandDeps): void {
@@ -53,12 +55,19 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
         : await buildFilePatch(deps.git, deps.store, repoRoot, relPath, (o) => o === view);
     let right: vscode.Uri = vscode.Uri.file(path.join(repoRoot, relPath));
     if (built) {
-      const tmp = await deps.git.applyPatchToTempFile(repoRoot, relPath, built.patch);
+      // variant = 视图标识：同一文件在多个视图下的 diff 可同时打开互不覆盖
+      const tmp = await deps.git.applyPatchToTempFile(repoRoot, relPath, built.patch, view);
       if (tmp) {
         right = vscode.Uri.file(tmp);
+        deps.trackTempFile(tmp);
       }
     }
-    void vscode.commands.executeCommand('vscode.diff', left, right, t('diffTitle', relPath));
+    // 标题带视图名（default / changelist 名），多个 diff 标签页能区分
+    const viewName =
+      view === 'unassigned'
+        ? t('unassigned')
+        : deps.store.changelistsOf(repoRoot).find((c) => c.id === view)?.name ?? view;
+    void vscode.commands.executeCommand('vscode.diff', left, right, t('diffTitle', relPath, viewName));
   });
 
   /**

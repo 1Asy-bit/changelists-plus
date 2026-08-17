@@ -348,6 +348,31 @@ test('store: 分配/移动/删除/持久化/损坏恢复', () => {
 
 // ================= engine =================
 
+// 回归：VS Code 不保证 context.storageUri 目录已存在（workspaceStorage 下扩展目录
+// 不会自动创建）。父目录缺失时保存必须能建目录并落盘——否则 changelist 退出即丢。
+test('store: 父目录不存在时也能持久化（模拟 context.storageUri）', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-store-'));
+  try {
+    // 故意不创建父目录，直接指向深层路径
+    const storage = path.join(base, 'not-yet-created', 'nested', 'changelists.json');
+    const store = new ChangelistStore(storage);
+    const cl = store.createChangelist('/fake/repo', 'Persistent CL');
+    store.setHunkOwners('/fake/repo', 'a.ts', [{ id: 'h1', oldStart: 1, oldLines: 2 }], cl.id);
+    // save() 是 setImmediate 防抖，这里同步 flush 验证 ensureDir 路径（deactivate 也走它）
+    store.flush();
+    assert.ok(fs.existsSync(storage), 'flush 后文件应存在（父目录被自动创建）');
+
+    // 重新加载（模拟下次打开 VS Code）→ changelist 与分配都还在
+    const store2 = new ChangelistStore(storage);
+    const cl2 = store2.changelistsOf('/fake/repo');
+    assert.strictEqual(cl2.length, 1);
+    assert.strictEqual(cl2[0].name, 'Persistent CL');
+    assert.strictEqual(store2.recordsWithOwner('/fake/repo', 'a.ts').length, 1);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('engine: 纯净提交——只提交 A，B 保留，worktree 逐字节不变', async () => {
   const { dir, gitSvc, store, cl, hunkB } = await setupTwoHunkScenario();
   try {
@@ -765,7 +790,7 @@ test('diff 视图：CL-A 下的文件合成内容只含 CL-A 的修改，不含 
     // CL-A 的 patch → 合成临时文件 = HEAD + 仅 A
     const patch = await buildFilePatch(gitSvc, store, dir, 'f.txt', (o) => o === cl.id);
     assert.ok(patch);
-    const tmp = await gitSvc.applyPatchToTempFile(dir, 'f.txt', patch!.patch);
+    const tmp = await gitSvc.applyPatchToTempFile(dir, 'f.txt', patch!.patch, cl.id);
     assert.ok(tmp);
     const synth = fs.readFileSync(tmp!, 'utf8');
     // HEAD + A：line2 是 A1，line11 仍是原始 l11（B 不出现）
@@ -786,7 +811,7 @@ test('diff 视图：Unassigned 下的文件合成内容只含未分配的修改'
     // 未分配的 patch（B）→ 合成 = HEAD + 仅 B
     const patch = await buildFilePatch(gitSvc, store, dir, 'f.txt', (o) => o === null);
     assert.ok(patch);
-    const tmp = await gitSvc.applyPatchToTempFile(dir, 'f.txt', patch!.patch);
+    const tmp = await gitSvc.applyPatchToTempFile(dir, 'f.txt', patch!.patch, 'unassigned');
     assert.ok(tmp);
     assert.strictEqual(
       fs.readFileSync(tmp!, 'utf8'),
@@ -795,7 +820,7 @@ test('diff 视图：Unassigned 下的文件合成内容只含未分配的修改'
     // CL-A 的合成不包含 B；两者的合成拼起来 = worktree
     const patchA = await buildFilePatch(gitSvc, store, dir, 'f.txt', (o) => o === cl.id);
     assert.ok(patchA);
-    const tmpA = await gitSvc.applyPatchToTempFile(dir, 'f.txt', patchA!.patch);
+    const tmpA = await gitSvc.applyPatchToTempFile(dir, 'f.txt', patchA!.patch, cl.id);
     assert.ok(tmpA);
     const synthA = fs.readFileSync(tmpA!, 'utf8');
     // 两处修改分别合成后，合并内容（A 位置取 A1，B 位置取 B1）应等于 worktree
@@ -823,7 +848,7 @@ test('diff 视图：未跟踪文件合成 = 文件内容（HEAD 为空基线）'
     );
     const patch = await buildFilePatch(gitSvc, store, dir, 'new.txt', (o) => o === cl.id);
     assert.ok(patch);
-    const tmp = await gitSvc.applyPatchToTempFile(dir, 'new.txt', patch!.patch);
+    const tmp = await gitSvc.applyPatchToTempFile(dir, 'new.txt', patch!.patch, cl.id);
     assert.ok(tmp);
     assert.strictEqual(fs.readFileSync(tmp!, 'utf8'), 'n1\nn2\n');
   } finally {
@@ -1153,15 +1178,53 @@ test('git: applyPatchToTempFile 按仓库隔离临时目录（多仓库同名文
 
     const p1 = parseGitDiff(await gitSvc.diffWorktree(dir1))[0];
     const p2 = parseGitDiff(await gitSvc.diffWorktree(dir2))[0];
-    const t1 = await gitSvc.applyPatchToTempFile(dir1, 'a.txt', serializePatch([p1]));
-    const t2 = await gitSvc.applyPatchToTempFile(dir2, 'a.txt', serializePatch([p2]));
+    const t1 = await gitSvc.applyPatchToTempFile(dir1, 'a.txt', serializePatch([p1]), 'view1');
+    const t2 = await gitSvc.applyPatchToTempFile(dir2, 'a.txt', serializePatch([p2]), 'view1');
     assert.ok(t1 && t2);
     assert.strictEqual(fs.readFileSync(t1!, 'utf8'), 'repo1-head\nrepo1-mod\n');
     assert.strictEqual(fs.readFileSync(t2!, 'utf8'), 'repo2-head\nrepo2-mod\n');
     assert.notStrictEqual(t1, t2, 'temp files must be isolated per repo');
+    // 同仓库同文件、不同视图（variant）→ 不同路径：可同时打开多个 diff 标签页
+    const t3 = await gitSvc.applyPatchToTempFile(dir1, 'a.txt', serializePatch([p1]), 'view2');
+    assert.ok(t3);
+    assert.notStrictEqual(t3, t1, 'same file in different views must not share a temp file');
+    // 同仓库同文件同视图 → 复用同一路径（再次点击激活既有标签页，不重复开）
+    const t4 = await gitSvc.applyPatchToTempFile(dir1, 'a.txt', serializePatch([p1]), 'view1');
+    assert.strictEqual(t4, t1, 'same view reuses the same temp path');
   } finally {
     fs.rmSync(dir1, { recursive: true, force: true });
     fs.rmSync(dir2, { recursive: true, force: true });
+  }
+});
+
+test('git: sweepSynthDir 只删过期的合成 diff 临时文件', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nchanged\n');
+    const gitSvc = new GitService(GIT, 3);
+    // 目录不存在时静默返回（无残留场景不报错）
+    gitSvc.sweepSynthDir(24 * 3600 * 1000);
+
+    const patch = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    const tmp = await gitSvc.applyPatchToTempFile(dir, 'f.txt', serializePatch([patch]), 'viewA');
+    assert.ok(tmp && fs.existsSync(tmp!));
+    const repoSynthDir = path.dirname(tmp!);
+
+    // 把 mtime 调成 2 天前 → 应被清扫
+    const old = Date.now() / 1000 - 2 * 86400;
+    fs.utimesSync(tmp!, old, old);
+    gitSvc.sweepSynthDir(24 * 3600 * 1000);
+    assert.ok(!fs.existsSync(tmp!), '过期的合成文件应被删除');
+
+    // 新合成的文件 → 保留（可能被正在恢复的 diff 标签页引用）
+    const tmp2 = await gitSvc.applyPatchToTempFile(dir, 'f.txt', serializePatch([patch]), 'viewA');
+    assert.ok(tmp2 && fs.existsSync(tmp2!));
+    gitSvc.sweepSynthDir(24 * 3600 * 1000);
+    assert.ok(fs.existsSync(tmp2!), '24h 内的合成文件应保留');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

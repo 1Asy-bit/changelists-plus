@@ -2,6 +2,7 @@
  * 扩展入口：装配各模块、注册命令与事件管线。
  */
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import * as path from 'path';
 import { initI18n, t } from './i18n';
 import { GitService } from './gitService';
@@ -11,19 +12,34 @@ import { ChangelistDragAndDrop, ChangelistTreeProvider } from './treeView';
 import { HEAD_SCHEME, HeadFileSystemProvider } from './headFsProvider';
 import { registerCommands } from './commands';
 
+/** 模块级引用：deactivate 时同步 flush，保证退出前 pending 写入真正落盘 */
+let store: ChangelistStore | undefined;
+
+/**
+ * 本会话创建的合成 diff 临时文件（diff 视图右侧内容）。
+ * 配套清理：视图关闭即删（onDidCloseTextDocument）、deactivate 清残留、
+ * 下次启动 TTL 清扫（崩溃残留，见 git.sweepSynthDir）。
+ */
+const tempFiles = new Set<string>();
+
 export function activate(context: vscode.ExtensionContext): void {
   initI18n();
   const output = vscode.window.createOutputChannel(t('viewName'));
   const cfg = vscode.workspace.getConfiguration('changelistsPlus');
   const gitPath = cfg.get<string>('gitPath') || 'git';
   const git = new GitService(gitPath, cfg.get<number>('contextLines') ?? 3);
+  // 启动清扫：清掉 >24h 的合成 diff 残留（崩溃/强退时没来得及删的）
+  git.sweepSynthDir(24 * 60 * 60 * 1000);
 
   if (!context.storageUri) {
     vscode.window.showWarningMessage(t('storageDirMissing'));
     return;
   }
-  const store = new ChangelistStore(path.join(context.storageUri.fsPath, 'changelists.json'));
-  for (const backupPath of store.warnings) {
+  // 局部 const：让 activate 内所有引用类型收窄为 ChangelistStore；
+  // 模块级 store 只用于 deactivate 时 flush
+  const s = new ChangelistStore(path.join(context.storageUri.fsPath, 'changelists.json'));
+  store = s;
+  for (const backupPath of s.warnings) {
     vscode.window.showWarningMessage(t('corruptStorage', backupPath));
   }
 
@@ -42,12 +58,12 @@ export function activate(context: vscode.ExtensionContext): void {
     () => vscode.workspace.getConfiguration('changelistsPlus').get<number>('contextLines') ?? 3,
     () => vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
   );
-  const provider = new ChangelistTreeProvider(detector, store);
+  const provider = new ChangelistTreeProvider(detector, s);
   const treeView = vscode.window.createTreeView('changelistsPlus', {
     treeDataProvider: provider,
     showCollapseAll: true,
     canSelectMany: true,
-    dragAndDropController: new ChangelistDragAndDrop(detector, store, () => {
+    dragAndDropController: new ChangelistDragAndDrop(detector, s, () => {
       void refreshAll();
     }),
   });
@@ -69,7 +85,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   // store 结构性变更（建/删/改名/分配）→ 全量刷新
-  store.on('change', () => {
+  s.on('change', () => {
     void refreshAll();
   });
   // detector 每次刷新（全量或单文件）→ 重绘视图
@@ -77,13 +93,13 @@ export function activate(context: vscode.ExtensionContext): void {
     provider.refresh();
     updateBadge();
   });
-  context.subscriptions.push({ dispose: () => store.removeAllListeners('change') });
+  context.subscriptions.push({ dispose: () => s.removeAllListeners('change') });
   context.subscriptions.push({ dispose: () => detector.removeAllListeners('change') });
 
   // ---- 命令 ----
   registerCommands(context, {
     detector,
-    store,
+    store: s,
     git,
     output,
     refreshAll,
@@ -97,6 +113,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const first = detector.snapshot()[0];
       return first ? { repoRoot: first.repoRoot } : undefined;
+    },
+    trackTempFile: (p) => {
+      tempFiles.add(p);
     },
   });
 
@@ -116,6 +135,20 @@ export function activate(context: vscode.ExtensionContext): void {
           void detector.refreshFile(fsPath);
         }, 400),
       );
+    }),
+  );
+
+  // ---- 合成 diff 临时文件：文档（diff 标签页）关闭即删 ----
+  // 只删登记过的合成文件；scheme 必须是 file（head 侧是自定义 scheme，不在此列）
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      if (doc.uri.scheme === 'file' && tempFiles.delete(doc.uri.fsPath)) {
+        try {
+          fs.unlinkSync(doc.uri.fsPath);
+        } catch {
+          /* 文件可能已被清理/占用，留给 TTL 清扫兜底 */
+        }
+      }
     }),
   );
 
@@ -179,5 +212,21 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // 所有订阅都挂在 context.subscriptions 上，随激活上下文自动清理
+  // 所有订阅都挂在 context.subscriptions 上，随激活上下文自动清理。
+  // save() 走 setImmediate 防抖，窗口关闭时可能来不及执行——这里同步 flush 兜底，
+  // 保证最后一次写入（如刚分配的改动）在退出前落盘。
+  store?.flush();
+  // 清理本会话残留的合成 diff 临时文件；仍打开的文档保留——
+  // 热退出（hot exit）恢复的 diff 标签页还引用着它们
+  const open = new Set(vscode.workspace.textDocuments.map((d) => d.uri.fsPath));
+  for (const p of tempFiles) {
+    if (!open.has(p)) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* 忽略：可能已被清理 */
+      }
+    }
+  }
+  tempFiles.clear();
 }

@@ -13,6 +13,11 @@ function hashRepoRoot(repoRoot: string): string {
   return createHash('sha256').update(repoRoot).digest('hex').slice(0, 12);
 }
 
+/** 视图标识（'unassigned' / changelist id）→ 定长短哈希（临时子目录名） */
+function hashVariant(variant: string): string {
+  return createHash('sha256').update(variant).digest('hex').slice(0, 8);
+}
+
 /**
  * pathspec magic：把路径按字面处理，文件名里的 * ? [ 不再当 glob。
  * git diff 不支持 --literal-pathspecs 选项，但两处（diff/ls-files）都支持 `:(literal)` 前缀。
@@ -23,6 +28,13 @@ function literalPathspec(relPath: string): string {
 
 /** 大仓库 diff 输出可能远超默认缓冲，需显式设置上限。 */
 const MAX_OUTPUT = 256 * 1024 * 1024;
+
+/**
+ * 合成 diff 临时目录根：/tmp/changelists-plus-synth/<repo 哈希>/...
+ * 这些文件只服务于打开的 diff 视图，可随时删除——再次点击文件会重新合成。
+ * 配套清理：视图关闭即删、deactivate 清残留、启动时 TTL 清扫（见 sweepSynthDir）。
+ */
+const SYNTH_ROOT = path.join(os.tmpdir(), 'changelists-plus-synth');
 
 export interface GitResult {
   code: number;
@@ -161,10 +173,21 @@ export class GitService {
    * 把基于 HEAD 基线的 patch 应用到一个临时文件（HEAD 内容 + patch），
    * 供「只看该 changelist 修改」的 diff 视图作为右侧内容。
    * 用 git apply 保证 CRLF/换行处理与 git 一致；返回临时文件路径，失败 → null。
+   *
+   * variant = 视图标识（'unassigned' 或 changelist id）：
+   * 同一文件在多个视图下可**同时打开多个 diff 标签页**——若所有视图共用同一个
+   * 临时文件，(left, right) URI 对相同，VS Code 只会激活已有标签页，且后开的
+   * 视图会覆盖先开的文件内容。按 (仓库, 视图) 分目录后各自独立；
+   * 再次打开同一视图同一文件则复用同一路径，VS Code 激活既有标签页（不重复开）。
    */
-  async applyPatchToTempFile(repoRoot: string, relPath: string, patch: string): Promise<string | null> {
-    // 按仓库区分临时目录：多仓库工作区里不同仓库的同名文件会互相覆盖
-    const dir = path.join(os.tmpdir(), 'changelists-plus-synth', hashRepoRoot(repoRoot));
+  async applyPatchToTempFile(
+    repoRoot: string,
+    relPath: string,
+    patch: string,
+    variant: string,
+  ): Promise<string | null> {
+    // 按仓库 + 视图区分临时目录：多仓库同名文件、同文件多视图互不覆盖
+    const dir = path.join(SYNTH_ROOT, hashRepoRoot(repoRoot), hashVariant(variant));
     const file = path.join(dir, relPath);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const head = await this.headFileContent(repoRoot, relPath);
@@ -179,6 +202,58 @@ export class GitService {
       return null;
     }
     return file;
+  }
+
+  /**
+   * 启动清扫：删除早于 maxAgeMs 的合成临时文件（崩溃/强退/未关闭 diff 的残留）。
+   * 按仓库哈希目录整体判断：目录内**最新文件**的 mtime 过期才删整个目录
+   * （目录 mtime 不随文件内容变化更新，stat 目录会永远判定为"新"）。
+   * 目录不存在时静默返回。
+   */
+  sweepSynthDir(maxAgeMs: number): void {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(SYNTH_ROOT, { withFileTypes: true });
+    } catch {
+      return; // 目录不存在，无残留
+    }
+    const now = Date.now();
+    for (const e of entries) {
+      const p = path.join(SYNTH_ROOT, e.name);
+      if (!e.isDirectory()) {
+        continue;
+      }
+      let newest = -Infinity;
+      const walk = (d: string): void => {
+        let items: fs.Dirent[];
+        try {
+          items = fs.readdirSync(d, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const it of items) {
+          const fp = path.join(d, it.name);
+          if (it.isDirectory()) {
+            walk(fp);
+          } else {
+            try {
+              newest = Math.max(newest, fs.statSync(fp).mtimeMs);
+            } catch {
+              /* 文件被并发清理，忽略 */
+            }
+          }
+        }
+      };
+      walk(p);
+      // 目录内无文件（newest < 0）不处理：可能是并发正在合成的目录
+      if (newest >= 0 && now - newest > maxAgeMs) {
+        try {
+          fs.rmSync(p, { recursive: true, force: true });
+        } catch {
+          /* 删除失败忽略，下次清扫再试 */
+        }
+      }
+    }
   }
 
   /** 未跟踪文件列表（仓库相对路径，/ 分隔） */

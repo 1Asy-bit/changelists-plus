@@ -83,6 +83,18 @@ export class ChangelistStore extends EventEmitter {
     }
   }
 
+  /**
+   * 写前确保目录存在：context.storageUri 指向的目录 VS Code 不保证已创建，
+   * 缺少 mkdir 会让 writeFileSync 抛 ENOENT 并被静默吞掉——所有数据只活在内存里，退出即丢。
+   */
+  private ensureDir(): void {
+    try {
+      fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    } catch {
+      /* 目录创建失败让后续写入自然失败，保持内存态 */
+    }
+  }
+
   /** 原子写：同目录临时文件 + rename（setImmediate 去重合并连续写入） */
   private save(): void {
     if (this.pendingSave) {
@@ -92,6 +104,7 @@ export class ChangelistStore extends EventEmitter {
     setImmediate(() => {
       this.pendingSave = false;
       try {
+        this.ensureDir();
         const tmp = this.filePath + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2));
         fs.renameSync(tmp, this.filePath);
@@ -101,9 +114,10 @@ export class ChangelistStore extends EventEmitter {
     });
   }
 
-  /** 同步落盘（测试用；绕过 setImmediate 防抖，保证断言前已持久化） */
+  /** 同步落盘（测试与 deactivate 用；绕过 setImmediate 防抖，保证退出前已持久化） */
   flush(): void {
     try {
+      this.ensureDir();
       const tmp = this.filePath + '.tmp';
       fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2));
       fs.renameSync(tmp, this.filePath);
