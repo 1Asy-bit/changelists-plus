@@ -1,11 +1,13 @@
-# 源码与开发文件（只发布编译产物）
-src/**
-scripts/**
-dist/test/**
-tsconfig.json
+# 发布包排除清单（vsce 专用，比 .gitignore 优先）
 .gitignore
-**/*.map
-
-# 打包产物与依赖
+.vscodeignore
+icontmp/**
+images/icon.svg
+scripts/**
+tmp.txt
 *.vsix
-node_modules/**
+.DS_Store
+src/**
+tsconfig.json
+dist/test/**
+**/*.map
