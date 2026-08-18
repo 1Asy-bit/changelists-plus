@@ -8,6 +8,10 @@ All notable changes to Changelists Plus are documented here.
 
 ## English
 
+### 0.2.10
+
+- Updated extension icon (new design)
+
 ### 0.2.9
 
 - **Staged-state dots**: changelist / file / `default` rows now show a status dot — green = fully staged, orange = partially staged, grey = nothing staged (theme-colored, matching Git decorations)
@@ -71,6 +75,10 @@ All notable changes to Changelists Plus are documented here.
 ---
 
 ## 中文
+
+### 0.2.10
+
+- 更新扩展图标（新设计）
 
 ### 0.2.9
 

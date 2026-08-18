@@ -1,0 +1,38 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="docGradL" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#f3f4f6"/>
+    </linearGradient>
+    <linearGradient id="foldGradL" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f9fafb"/>
+      <stop offset="100%" style="stop-color:#e5e7eb"/>
+    </linearGradient>
+    <filter id="shadowL" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="12" flood-color="#000" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+  
+  <!-- 主文档：撑满画布 -->
+  <rect x="32" y="24" width="448" height="464" rx="48" fill="url(#docGradL)" stroke="#d1d5db" stroke-width="3" filter="url(#shadowL)"/>
+  
+  <!-- 折角 -->
+  <path d="M 352 24 L 480 24 L 480 152 Z" fill="url(#foldGradL)"/>
+  <path d="M 352 24 L 352 152 L 480 152 Z" fill="#d1d5db" opacity="0.6"/>
+  
+  <!-- 列表项 1: 新增 (绿色) -->
+  <rect x="96" y="152" width="48" height="48" rx="12" fill="#22c55e"/>
+  <rect x="176" y="164" width="256" height="16" rx="8" fill="#9ca3af"/>
+  
+  <!-- 列表项 2: 修改 (蓝色) -->
+  <rect x="96" y="248" width="48" height="48" rx="12" fill="#3b82f6"/>
+  <rect x="176" y="260" width="224" height="16" rx="8" fill="#9ca3af"/>
+  
+  <!-- 列表项 3: 变更 (橙色) -->
+  <rect x="96" y="344" width="48" height="48" rx="12" fill="#f59e0b"/>
+  <rect x="176" y="356" width="272" height="16" rx="8" fill="#9ca3af"/>
+  
+  <!-- 底部 Changelist 徽章 -->
+  <circle cx="400" cy="400" r="88" fill="#3b82f6" filter="url(#shadowL)"/>
+  <path d="M 376 400 L 400 376 L 424 400 M 400 376 L 400 424" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

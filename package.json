@@ -2,7 +2,7 @@
   "name": "changelists-plus",
   "displayName": "Changelists Plus",
   "description": "IDEA-style changelists with partial commit: split changes inside a single file across changelists and commit them separately",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "publisher": "1Asy-bit",
   "repository": {
     "type": "git",
@@ -12,7 +12,7 @@
     "url": "https://github.com/1Asy-bit/changelists-plus/issues"
   },
   "homepage": "https://github.com/1Asy-bit/changelists-plus",
-  "icon": "icon.png",
+  "icon": "images/icon.png",
   "license": "MIT",
   "keywords": [
     "changelist",
