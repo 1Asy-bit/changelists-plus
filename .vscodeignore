@@ -3,6 +3,7 @@
 .vscodeignore
 icontmp/**
 images/icon.svg
+icon.png
 scripts/**
 tmp.txt
 *.vsix
