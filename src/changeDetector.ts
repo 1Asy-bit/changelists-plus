@@ -110,12 +110,17 @@ export class ChangeDetector extends EventEmitter {
    */
   private stagedByRoot = new Map<string, Map<string, Set<string>>>();
   /**
-   * 刷新版本号：refreshAll / refreshFile 并发时（保存防抖与 watcher/命令触发交错），
-   * 早发起的刷新若后完成，会用过期 diff 覆盖新模型（刚保存的改动从视图消失，
-   * 且 noteMatched 可能把旧 diff 里看不到的 hunk 误判 stale）。每次刷新取号，
-   * 结束时若自己不是最新号则丢弃结果。
+   * 刷新版本号（两套独立，互不作废）：
+   * - allVersion：全量刷新（refreshAll）之间互作废。单文件刷新（保存 / watcher 防抖）
+   *   不参与取号——否则点击刷新按钮期间任何文件保存都会把全量刷新作废，
+   *   视图停留在旧状态（"点了刷新却没同步"）。
+   * - fileVersions：按文件独立计数。多个文件同时变化（终端批量写入）各自刷新互不作废；
+   *   同一文件高频变化只保留最后一次（与 extension 的 400ms 防抖互补）。
+   * 每次刷新取号，结束时若自己不是最新号则丢弃结果（避免过期 diff 覆盖新模型，
+   * 且 noteMatched 可能把旧 diff 里看不到的 hunk 误判 stale）。
    */
-  private version = 0;
+  private allVersion = 0;
+  private fileVersions = new Map<string, number>();
 
   constructor(
     private git: GitService,
@@ -149,7 +154,7 @@ export class ChangeDetector extends EventEmitter {
   }
 
   async refreshAll(): Promise<void> {
-    const v = ++this.version;
+    const v = ++this.allVersion;
     const roots = new Set<string>();
     for (const folder of this.getFolders()) {
       const r = await this.git.getRepoRoot(folder);
@@ -158,12 +163,12 @@ export class ChangeDetector extends EventEmitter {
       }
     }
     for (const root of roots) {
-      if (v !== this.version) {
-        return; // 已有更新的刷新发起，丢弃本次结果
+      if (v !== this.allVersion) {
+        return; // 已有更新的全量刷新发起，丢弃本次结果（单文件刷新不参与作废）
       }
       await this.refreshRepo(root, v);
     }
-    if (v !== this.version) {
+    if (v !== this.allVersion) {
       return;
     }
     for (const key of [...this.models.keys()]) {
@@ -175,9 +180,13 @@ export class ChangeDetector extends EventEmitter {
     this.emit('change');
   }
 
-  /** 单文件定向刷新（保存后触发） */
+  /** 单文件定向刷新（保存 / 外部修改后触发） */
   async refreshFile(fsPath: string): Promise<void> {
-    const v = ++this.version;
+    // per-file 版本号：不同文件的刷新互不作废（终端批量写入的多个文件都要同步）；
+    // 同一文件高频变化只保留最后一次。key 在刷新完成时删除，map 无长期增长
+    const key = realpathSafe(fsPath);
+    const v = (this.fileVersions.get(key) ?? 0) + 1;
+    this.fileVersions.set(key, v);
     const root = await this.resolveRepo(fsPath);
     if (!root) {
       return;
@@ -186,38 +195,44 @@ export class ChangeDetector extends EventEmitter {
     // realpath，path.relative 才算得出仓库内相对路径
     const p = realpathSafe(fsPath);
     const rel = path.relative(root, p).split(path.sep).join('/');
-    if (v !== this.version) {
+    const stale = (): boolean => this.fileVersions.get(key) !== v;
+    if (stale()) {
       return;
     }
     if (!this.models.has(root)) {
-      await this.refreshRepo(root, v);
+      // 模型尚未初始化：全量兜底。不传 token——refreshFile 已按文件版本号校验，
+      // 且 refreshRepo 的 token 语义是 allVersion，传 per-file 号会误作废
+      await this.refreshRepo(root);
       return;
     }
     const untracked = await this.git.isUntracked(root, rel);
-    if (v !== this.version) {
+    if (stale()) {
       return;
     }
     if (untracked) {
       this.upsertFile(root, rel, this.buildUntrackedModel(root, rel));
     } else {
       const changes = parseGitDiff(await this.git.diffFile(root, rel));
-      if (v !== this.version) {
+      if (stale()) {
         return;
       }
       const fc = changes.find((c) => c.path === rel);
       this.upsertFile(root, rel, fc ? this.buildModelForChange(root, fc) : null);
     }
+    this.fileVersions.delete(key);
     this.emit('change');
   }
 
   private async refreshRepo(root: string, token?: number): Promise<void> {
-    const [diffText, untracked, stagedText] = await Promise.all([
+    // headExists 也并入并行：原实现串行 await 多等一个进程往返（低配机明显）
+    const [diffText, untracked, stagedText, headExists] = await Promise.all([
       this.git.diffWorktree(root),
       this.git.untrackedFiles(root),
       this.git.diffStaged(root),
+      this.git.headExists(root),
     ]);
-    if (token !== undefined && token !== this.version) {
-      return; // 过期刷新：丢弃，避免旧 diff 覆盖新模型
+    if (token !== undefined && token !== this.allVersion) {
+      return; // 过期全量刷新：丢弃，避免旧 diff 覆盖新模型（refreshFile 不传 token）
     }
     // 暂存缓存：diff --cached 与 diffWorktree 同 flags 同解析器，路径/换行体系一致，
     // hunk id 为内容哈希，直接与视图模型 hunk 匹配（staged 后工作区再编辑 → id 变 → 自然失配）
@@ -240,10 +255,6 @@ export class ChangeDetector extends EventEmitter {
       }
     }
     files.sort((a, b) => a.change.path.localeCompare(b.change.path));
-    const headExists = await this.git.headExists(root);
-    if (token !== undefined && token !== this.version) {
-      return; // headExists 的 await 期间有新刷新发起，丢弃本次
-    }
     this.models.set(root, {
       repoRoot: root,
       headExists,

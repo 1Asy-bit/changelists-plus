@@ -24,6 +24,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   FileChange,
+  Hunk,
   isBinaryContent,
   makeUntrackedChange,
   parseGitDiff,
@@ -354,15 +355,27 @@ async function guardRepo(
   git: GitService,
   repoRoot: string,
 ): Promise<'mergeInProgress' | 'unmerged' | 'noHead' | null> {
-  for (const name of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']) {
-    if (await git.guardPathExists(repoRoot, name)) {
-      return 'mergeInProgress';
-    }
+  // 全部检查并行（5 个状态文件 + unmerged + HEAD），低配机省掉串行排队；
+  // 结果按原优先级返回（merge 状态 > 冲突 > unborn），语义不变
+  const [inProgress, unmerged, headExists] = await Promise.all([
+    (async () => {
+      const found = await Promise.all(
+        ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply'].map((name) =>
+          git.guardPathExists(repoRoot, name),
+        ),
+      );
+      return found.some(Boolean);
+    })(),
+    git.hasUnmerged(repoRoot),
+    git.headExists(repoRoot),
+  ]);
+  if (inProgress) {
+    return 'mergeInProgress';
   }
-  if (await git.hasUnmerged(repoRoot)) {
+  if (unmerged) {
     return 'unmerged';
   }
-  if (!(await git.headExists(repoRoot))) {
+  if (!headExists) {
     return 'noHead';
   }
   return null;
@@ -454,6 +467,9 @@ export interface FilePatchResult {
  * 收集单个文件中满足 owner 过滤条件的当前 hunks，重建为基于 HEAD 的 patch。
  * 未匹配到 store 记录的 hunk 视为未分配（ownerFilter(null)）。
  * 用于「点击 changelist 下的文件只看该 changelist 修改」的 diff 视图与按视图撤销。
+ *
+ * 性能：只做**单文件** git 调用（diffFile / isUntracked），不走全量 freshDiff——
+ * 低配置机器 / 大仓库下「打开 diff 视图」卡顿的主因是点击一个文件却全仓扫描。
  */
 export async function buildFilePatch(
   git: GitService,
@@ -462,8 +478,22 @@ export async function buildFilePatch(
   relPath: string,
   ownerFilter: (ownerId: string | null) => boolean,
 ): Promise<FilePatchResult | null> {
-  const fresh = await freshDiff(git, repoRoot);
-  const fc = fresh.find((f) => f.path === relPath);
+  let fc: FileChange | undefined;
+  if (await git.isUntracked(repoRoot, relPath)) {
+    let buf: Buffer;
+    try {
+      buf = fs.readFileSync(path.join(repoRoot, relPath));
+    } catch {
+      return null; // 文件在扫描间隙被删除
+    }
+    if (isBinaryContent(buf)) {
+      return null; // 二进制未跟踪文件无可分配 hunks
+    }
+    fc = makeUntrackedChange(relPath, buf.toString('utf8'));
+  } else {
+    // 已跟踪文件：单文件 pathspec diff（文件名含 * ? [ 已按字面处理，见 literalPathspec）
+    fc = parseGitDiff(await git.diffFile(repoRoot, relPath)).find((c) => c.path === relPath);
+  }
   if (!fc) {
     return null;
   }
@@ -535,19 +565,27 @@ export type StageResult =
  * 与提交不同：stage 失败时**绝不 reset**——apply 失败是原子的，index 保持原样，
  * 不会丢掉用户已有的暂存状态。
  */
+/**
+ * 暂存指定 hunks 到 index。
+ * fresh 可选：调用方（stageChangelist / stageUnassigned）收集记录时已算过全量
+ * freshDiff，直接传入复用——同一批次内 worktree 无写入，两遍全量 diff 结果相同，
+ * 低配机 / 大仓库下避免重复扫描。未传时自己算（stageHunk 等单文件入口）。
+ */
 export async function stageRecords(
   git: GitService,
   repoRoot: string,
   records: Map<string, StoredHunk[]>,
+  fresh?: FileChange[],
 ): Promise<StageResult> {
   const guardErr = await guardRepo(git, repoRoot);
   if (guardErr) {
     return { ok: false, error: guardErr };
   }
-  const fresh = await freshDiff(git, repoRoot);
-  // 已暂存的 hunk 不再重复应用（幂等 no-op）——避免对已 staged 内容 apply 报"改动已变化"
+  const freshChanges = fresh ?? (await freshDiff(git, repoRoot));
+  // 已暂存的 hunk 不再重复应用（幂等 no-op）——避免对已 staged 内容 apply 报"改动已变化"；
+  // diffStaged 只取 records 涉及的文件（pathspec 限制），大仓库下省掉全量 staged diff
   const stagedIdsByPath = new Map<string, Set<string>>();
-  for (const fc of parseGitDiff(await git.diffStaged(repoRoot))) {
+  for (const fc of parseGitDiff(await git.diffStaged(repoRoot, [...records.keys()]))) {
     stagedIdsByPath.set(fc.path, new Set(fc.hunks.map((h) => h.id)));
   }
   const wantByPath = new Map<string, Set<string>>();
@@ -557,7 +595,7 @@ export async function stageRecords(
   const patchFiles: FileChange[] = [];
   const chosenIdsByPath = new Map<string, Set<string>>();
   let stagedCount = 0;
-  for (const fc of fresh) {
+  for (const fc of freshChanges) {
     const wantIds = wantByPath.get(fc.path);
     if (!wantIds) {
       continue;
@@ -576,12 +614,45 @@ export async function stageRecords(
   }
   // F1：fresh 坐标含所有 worktree 改动，apply 目标是 index（只含已暂存）——
   // 纯插入 hunk 的 newStart 修正，否则上方未暂存改动会让插入点静默错位
-  fixStageInsertionCoords(fresh, chosenIdsByPath, stagedIdsByPath);
+  fixStageInsertionCoords(freshChanges, chosenIdsByPath, stagedIdsByPath);
   const applied = await applyWithFallbacks(git, repoRoot, serializePatch(patchFiles));
   if (!applied.ok) {
     return { ok: false, error: 'applyFailed', stderr: applied.stderr };
   }
   return { ok: true, stagedCount };
+}
+
+/**
+ * 收集 fresh diff 中属于指定 changelist 的 hunks 记录（与 buildChangelistPatch
+ * 同一匹配体系：内容哈希优先、位置回退）。收集与 stageRecords 共享同一份 fresh，
+ * 避免 stageChangelist 里全量 diff 跑两遍。
+ */
+function collectRecordsForOwner(
+  fresh: FileChange[],
+  store: ChangelistStore,
+  repoRoot: string,
+  changelistId: string,
+): Map<string, StoredHunk[]> {
+  const records = new Map<string, StoredHunk[]>();
+  for (const fc of fresh) {
+    const withOwner = store.recordsWithOwner(repoRoot, fc.path);
+    const { owners } = matchFileHunks(fc.hunks, withOwner.map((w) => w.record));
+    const ownerOf = new Map(withOwner.map((w) => [w.record, w.ownerId]));
+    const chosen: Hunk[] = [];
+    for (let i = 0; i < fc.hunks.length; i++) {
+      const rec = owners[i];
+      if (rec && ownerOf.get(rec) === changelistId) {
+        chosen.push(fc.hunks[i]);
+      }
+    }
+    if (chosen.length > 0) {
+      records.set(
+        fc.path,
+        chosen.map((h) => ({ id: h.id, oldStart: h.oldStart, oldLines: h.oldLines })),
+      );
+    }
+  }
+  return records;
 }
 
 /** 暂存 default（未分配）下的全部当前 hunks */
@@ -610,7 +681,8 @@ export async function stageUnassigned(
   if (records.size === 0) {
     return { ok: false, error: 'empty' };
   }
-  return stageRecords(git, repoRoot, records);
+  // fresh 复用：收集与 stageRecords 各算一遍全量 diff 是同一内容
+  return stageRecords(git, repoRoot, records, fresh);
 }
 
 /** 暂存一个 changelist 的全部当前 hunks */
@@ -625,19 +697,13 @@ export async function stageChangelist(opts: {
   if (guardErr) {
     return { ok: false, error: guardErr };
   }
-  const built = await buildChangelistPatch(git, store, repoRoot, changelistId);
-  if (!built) {
+  const fresh = await freshDiff(git, repoRoot);
+  const records = collectRecordsForOwner(fresh, store, repoRoot, changelistId);
+  if (records.size === 0) {
     return { ok: false, error: 'empty' };
   }
-  // 走 stageRecords：复用「已暂存 hunk 过滤」逻辑（重复暂存同一 changelist → 幂等 no-op）
-  const records = new Map<string, StoredHunk[]>();
-  for (const [p, ids] of built.committedIds) {
-    records.set(
-      p,
-      [...ids].map((id) => ({ id, oldStart: 0, oldLines: 0 })),
-    );
-  }
-  return stageRecords(git, repoRoot, records);
+  // fresh 复用 + 走 stageRecords 的「已暂存 hunk 过滤」逻辑（重复暂存 → 幂等 no-op）
+  return stageRecords(git, repoRoot, records, fresh);
 }
 
 // ================= 撤销（discard，按视图） =================

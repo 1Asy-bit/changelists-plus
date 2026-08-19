@@ -78,6 +78,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const refreshAll = async (): Promise<void> => {
+    // HEAD 内容缓存失效：commit / 切分支 / reset 等任何 HEAD 变化都经 refreshAll 到达
+    // （git watcher 500ms 防抖、命令尾部、工作区/配置变更），统一在此清缓存。
+    // refreshFile（保存文件）不清——保存不改变 HEAD，缓存仍有效。
+    git.clearHeadCache();
     await detector.refreshAll();
     provider.refresh();
     updateBadge();
@@ -118,24 +122,53 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   });
 
-  // ---- 保存后单文件刷新（防抖；git 只能 diff 已保存内容） ----
-  const saveTimers = new Map<string, NodeJS.Timeout>();
+  // ---- 文件变化 → 单文件刷新（防抖；git 只能 diff 已保存内容） ----
+  // 两个入口共用同一防抖表，对同一文件只刷一次：
+  // - onDidSaveTextDocument：编辑器内保存
+  // - onDidChangeWatchedFiles：外部修改（终端 / 外部工具直接写磁盘，不经编辑器）。
+  //   内置 SCM 面板靠 VS Code 自己的 watcher 实时显示这类改动，而插件此前只响应
+  //   编辑器保存与 .git 事件——终端改动的文件（如本仓库的源码）在 default 下不出现。
+  // 新建 / 删除文件同样走这里（refreshFile 对 deleted 输出删除 diff）。
+  const fileTimers = new Map<string, NodeJS.Timeout>();
+  const scheduleFileRefresh = (fsPath: string): void => {
+    const prev = fileTimers.get(fsPath);
+    if (prev) {
+      clearTimeout(prev);
+    }
+    fileTimers.set(
+      fsPath,
+      setTimeout(() => {
+        fileTimers.delete(fsPath);
+        void detector.refreshFile(fsPath);
+      }, 400),
+    );
+  };
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument((doc) => {
-      const fsPath = doc.uri.fsPath;
-      const prev = saveTimers.get(fsPath);
-      if (prev) {
-        clearTimeout(prev);
-      }
-      saveTimers.set(
-        fsPath,
-        setTimeout(() => {
-          saveTimers.delete(fsPath);
-          void detector.refreshFile(fsPath);
-        }, 400),
-      );
+      scheduleFileRefresh(doc.uri.fsPath);
     }),
   );
+  // 工作区文件 watcher（覆盖外部修改：终端 / 外部工具直接写磁盘，不经编辑器）。
+  // 内置 SCM 面板靠 VS Code 自己的 watcher 实时显示这类改动，而插件此前只响应
+  // 编辑器保存与 .git 事件——终端改动的文件（如本仓库的源码）在 default 下不出现。
+  // 新建 / 删除文件同样走这里（refreshFile 对 deleted 输出删除 diff）。
+  const fileWatcher = vscode.workspace.createFileSystemWatcher('**/*');
+  const onWorktreeChange = (uri: vscode.Uri): void => {
+    const p = uri.fsPath;
+    // .git 事件走 git watcher → refreshAll（单文件刷新会与其竞争版本号）；
+    // node_modules / dist 被 .gitignore 排除，diff 不产生，跳过只省进程
+    if (
+      /(^|[\\/])\.git([\\/]|$)/.test(p) ||
+      /(^|[\\/])(node_modules|dist)([\\/]|$)/.test(p)
+    ) {
+      return;
+    }
+    scheduleFileRefresh(p);
+  };
+  fileWatcher.onDidChange(onWorktreeChange);
+  fileWatcher.onDidCreate(onWorktreeChange);
+  fileWatcher.onDidDelete(onWorktreeChange);
+  context.subscriptions.push(fileWatcher);
 
   // ---- 合成 diff 临时文件：文档（diff 标签页）关闭即删 ----
   // 只删登记过的合成文件；scheme 必须是 file（head 侧是自定义 scheme，不在此列）

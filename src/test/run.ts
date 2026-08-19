@@ -1138,6 +1138,61 @@ test('git: headFileContent 返回 HEAD 原始字节，未跟踪返回 null', asy
   }
 });
 
+test('git: diffStaged 支持 pathspec 限制（只输出指定文件）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'a.txt', 'a1\n');
+    writeFile(dir, 'b.txt', 'b1\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'a.txt', 'a1\na2\n');
+    writeFile(dir, 'b.txt', 'b1\nb2\n');
+    const gitSvc = new GitService(GIT);
+    git(dir, ['add', 'a.txt', 'b.txt']);
+    const all = parseGitDiff(await gitSvc.diffStaged(dir));
+    assert.strictEqual(all.length, 2, '无 pathspec → 全量 staged diff');
+    // pathspec 限制：只输出指定文件（stage 路径只关心 records 涉及的文件）
+    const one = parseGitDiff(await gitSvc.diffStaged(dir, ['a.txt']));
+    assert.strictEqual(one.length, 1);
+    assert.strictEqual(one[0].path, 'a.txt');
+    // 文件名含 * ? [ 时按字面处理（literal pathspec）
+    writeFile(dir, 'c*d.txt', 'c1\n');
+    git(dir, ['add', 'c*d.txt']);
+    const lit = parseGitDiff(await gitSvc.diffStaged(dir, ['c*d.txt']));
+    assert.strictEqual(lit.length, 1);
+    assert.strictEqual(lit[0].path, 'c*d.txt');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('git: headFileContent 内容缓存，clearHeadCache 后刷新', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'v1\n');
+    commitAll(dir, 'init');
+    const gitSvc = new GitService(GIT);
+    assert.strictEqual((await gitSvc.headFileContent(dir, 'f.txt'))!.toString('utf8'), 'v1\n');
+    // 缓存命中：内容未变时重复读取幂等
+    assert.strictEqual((await gitSvc.headFileContent(dir, 'f.txt'))!.toString('utf8'), 'v1\n');
+    // HEAD 变化后不清缓存 → 仍返回旧内容（缓存语义；diff 视图省掉重复 git show）
+    writeFile(dir, 'f.txt', 'v2\n');
+    commitAll(dir, 'c2');
+    assert.strictEqual((await gitSvc.headFileContent(dir, 'f.txt'))!.toString('utf8'), 'v1\n');
+    // clearHeadCache（extension.refreshAll 的 HEAD 变化路径会调用）→ 新内容
+    gitSvc.clearHeadCache();
+    assert.strictEqual((await gitSvc.headFileContent(dir, 'f.txt'))!.toString('utf8'), 'v2\n');
+    // 未跟踪文件缓存 null：文件进 HEAD 后须 clear 才刷新
+    assert.strictEqual(await gitSvc.headFileContent(dir, 'g.txt'), null);
+    writeFile(dir, 'g.txt', 'g\n');
+    commitAll(dir, 'c3');
+    assert.strictEqual(await gitSvc.headFileContent(dir, 'g.txt'), null, '缓存 null 直到 clearHeadCache');
+    gitSvc.clearHeadCache();
+    assert.strictEqual((await gitSvc.headFileContent(dir, 'g.txt'))!.toString('utf8'), 'g\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('git: 文件名含 * 的通配符字符——--literal-pathspecs 回归', async () => {
   const dir = makeRepo();
   try {
@@ -1161,6 +1216,35 @@ test('git: 文件名含 * 的通配符字符——--literal-pathspecs 回归', a
     assert.strictEqual(await gitSvc.isUntracked(dir, 'a*b.txt'), false, 'tracked must stay tracked');
     assert.strictEqual(await gitSvc.isUntracked(dir, 'a?b.txt'), true, 'untracked must be detected');
     assert.strictEqual(await gitSvc.isUntracked(dir, 'a*c.txt'), true, 'untracked must be detected');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('diff 视图：文件名含 * 的文件 buildFilePatch 只取该文件（单文件化 + literal pathspec）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'a*b.txt', 'one\n');
+    writeFile(dir, 'axb.txt', 'two\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'a*b.txt', 'one\nchanged\n');
+    writeFile(dir, 'axb.txt', 'two\nchanged\n');
+    const { gitSvc, store } = newEngine(dir);
+    const cl = store.createChangelist(dir, 'CL');
+    const fc = parseGitDiff(await gitSvc.diffFile(dir, 'a*b.txt'))[0];
+    store.setHunkOwners(
+      dir,
+      'a*b.txt',
+      fc.hunks.map((h) => ({ id: h.id, oldStart: h.oldStart, oldLines: h.oldLines })),
+      cl.id,
+    );
+    // 单文件化后仍只命中 a*b.txt：glob 同名文件 axb.txt 不混入
+    const patch = await buildFilePatch(gitSvc, store, dir, 'a*b.txt', (o) => o === cl.id);
+    assert.ok(patch);
+    assert.strictEqual(patch!.count, 1);
+    const tmp = await gitSvc.applyPatchToTempFile(dir, 'a*b.txt', patch!.patch, cl.id);
+    assert.ok(tmp);
+    assert.strictEqual(fs.readFileSync(tmp!, 'utf8'), 'one\nchanged\n');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1282,6 +1366,67 @@ test('engine: 重复暂存已暂存的 hunks——幂等 no-op（优化5 回归�
       new Set(staged2[0].hunks.map((h) => h.id)),
       new Set([hunkA.id, hunkB.id]),
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ================= 并发刷新（版本号竞态回归） =================
+
+test('并发：refreshAll 不被并发的 refreshFile 作废（点刷新必生效）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'a.txt', 'a1\n');
+    writeFile(dir, 'b.txt', 'b1\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'a.txt', 'a1\na2\n');
+    writeFile(dir, 'b.txt', 'b1\nb2\n');
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll(); // 初始模型（a、b 修改都可见）
+    // 模拟：终端写入新文件 c.txt 后用户点击刷新，refreshFile 在 refreshAll
+    // 的 git 调用窗口内取号（旧实现：单文件刷新会作废全量刷新 → c.txt 丢失）
+    writeFile(dir, 'c.txt', 'c1\n');
+    const p1 = det.refreshAll();
+    await new Promise((r) => setTimeout(r, 50));
+    const p2 = det.refreshFile(path.join(dir, 'a.txt'));
+    await Promise.all([p1, p2]);
+    const m = det.getModel(root);
+    assert.ok(m);
+    assert.deepStrictEqual(
+      m!.files.map((f) => f.change.path).sort(),
+      ['a.txt', 'b.txt', 'c.txt'],
+      '全量刷新不能被单文件刷新作废：c.txt 必须可见',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('并发：多文件 refreshFile 互不作废（终端批量写入）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'a.txt', 'a1\n');
+    commitAll(dir, 'init');
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    // root 是 git 的 realpath（macOS /var → /private/var），模型按 root 键
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    // 终端批量写入 a（修改）、b（新建），watcher 防抖同时到点
+    writeFile(dir, 'a.txt', 'a1\na2\n');
+    writeFile(dir, 'b.txt', 'b1\n');
+    const p1 = det.refreshFile(path.join(dir, 'a.txt'));
+    const p2 = det.refreshFile(path.join(dir, 'b.txt'));
+    await Promise.all([p1, p2]);
+    const m = det.getModel(root);
+    assert.ok(m);
+    const a = m!.files.find((f) => f.change.path === 'a.txt');
+    const b = m!.files.find((f) => f.change.path === 'b.txt');
+    assert.ok(a && a.hunks.length === 1, 'a.txt 的修改不能被 b.txt 的刷新作废');
+    assert.ok(b && b.change.kind === 'new', 'b.txt 必须可见');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
