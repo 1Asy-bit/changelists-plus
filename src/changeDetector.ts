@@ -148,7 +148,12 @@ export class ChangeDetector extends EventEmitter {
     let root = this.folderRoots.get(folder);
     if (root === undefined) {
       root = await this.git.getRepoRoot(folder);
-      this.folderRoots.set(folder, root);
+      // 只缓存已确认的仓库 root：null（非仓库）不缓存——git init 后新仓库
+      // 才能被识别（refreshAll 复用了本缓存，缓存 null 会让它永久失效）。
+      // 非仓库 folder 仅在保存其内文件时才被查询，每轮最多一次 rev-parse，可接受
+      if (root !== null) {
+        this.folderRoots.set(folder, root);
+      }
     }
     return root;
   }
@@ -157,7 +162,9 @@ export class ChangeDetector extends EventEmitter {
     const v = ++this.allVersion;
     const roots = new Set<string>();
     for (const folder of this.getFolders()) {
-      const r = await this.git.getRepoRoot(folder);
+      // 复用 resolveRepo 的 folderRoots 缓存：多文件夹工作区每轮全量刷新
+      // 省掉重复的 rev-parse 进程（首轮填充后即命中）
+      const r = await this.resolveRepo(folder);
       if (r) {
         roots.add(r);
       }

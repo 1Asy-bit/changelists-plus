@@ -22,6 +22,14 @@ let store: ChangelistStore | undefined;
  */
 const tempFiles = new Set<string>();
 
+/**
+ * 文件批量刷新升级阈值：防抖窗口内变化的文件数 ≥ 此值时，不再逐个
+ * refreshFile（2 进程/文件），而是升级为一次 refreshAll（4 进程/仓库）。
+ * 4 文件 = 8 进程 > 全量 4 进程，且批量变化（checkout/build/批量脚本）
+ * 本就该全量同步。
+ */
+const BATCH_REFRESH_THRESHOLD = 4;
+
 export function activate(context: vscode.ExtensionContext): void {
   initI18n();
   const output = vscode.window.createOutputChannel(t('viewName'));
@@ -82,9 +90,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // （git watcher 500ms 防抖、命令尾部、工作区/配置变更），统一在此清缓存。
     // refreshFile（保存文件）不清——保存不改变 HEAD，缓存仍有效。
     git.clearHeadCache();
+    // 视图重绘统一由 detector 的 'change' 事件驱动（refreshAll 内部 emit）——
+    // 此前这里 return 后又显式 provider.refresh()/updateBadge()，同一数据被
+    // 完整重建两轮，低配机上每轮都是全树重绘
     await detector.refreshAll();
-    provider.refresh();
-    updateBadge();
   };
 
   // store 结构性变更（建/删/改名/分配）→ 全量刷新
@@ -122,26 +131,40 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   });
 
-  // ---- 文件变化 → 单文件刷新（防抖；git 只能 diff 已保存内容） ----
-  // 两个入口共用同一防抖表，对同一文件只刷一次：
+  // ---- 文件变化 → 单文件刷新（批量防抖；git 只能 diff 已保存内容） ----
+  // 两个入口共用同一防抖窗口，对同一文件只刷一次：
   // - onDidSaveTextDocument：编辑器内保存
   // - onDidChangeWatchedFiles：外部修改（终端 / 外部工具直接写磁盘，不经编辑器）。
   //   内置 SCM 面板靠 VS Code 自己的 watcher 实时显示这类改动，而插件此前只响应
   //   编辑器保存与 .git 事件——终端改动的文件（如本仓库的源码）在 default 下不出现。
   // 新建 / 删除文件同样走这里（refreshFile 对 deleted 输出删除 diff）。
-  const fileTimers = new Map<string, NodeJS.Timeout>();
+  //
+  // 批量防抖：窗口内所有文件合并进同一个 timer。此前每文件独立 timer，终端批量
+  // 写入（checkout / build / 批量脚本）时每个文件各起一组并发 git 进程——
+  // 单文件刷新 = 2 进程/文件（isUntracked + diffFile），N 个文件 = 2N 进程，
+  // 低配机上同时打满。到点时按数量分流：
+  // - ≥ BATCH_REFRESH_THRESHOLD：升级为一次全量刷新（4 进程覆盖全部文件，
+  //   顺带保证 staged 缓存一致）；批量变化大概率不是零星编辑，全量更划算
+  // - 少量文件：逐个 refreshFile（只 diff 变更的文件，输出远小于全量）
+  const pendingFiles = new Set<string>();
+  let batchTimer: NodeJS.Timeout | undefined;
   const scheduleFileRefresh = (fsPath: string): void => {
-    const prev = fileTimers.get(fsPath);
-    if (prev) {
-      clearTimeout(prev);
+    pendingFiles.add(fsPath);
+    if (batchTimer) {
+      clearTimeout(batchTimer);
     }
-    fileTimers.set(
-      fsPath,
-      setTimeout(() => {
-        fileTimers.delete(fsPath);
-        void detector.refreshFile(fsPath);
-      }, 400),
-    );
+    batchTimer = setTimeout(() => {
+      batchTimer = undefined;
+      const files = [...pendingFiles];
+      pendingFiles.clear();
+      if (files.length >= BATCH_REFRESH_THRESHOLD) {
+        void refreshAll();
+      } else {
+        for (const p of files) {
+          void detector.refreshFile(p);
+        }
+      }
+    }, 400);
   };
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument((doc) => {
