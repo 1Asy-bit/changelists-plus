@@ -8,6 +8,15 @@ All notable changes to Changelists Plus are documented here.
 
 ## English
 
+### 0.2.11
+
+- **Refresh sync fix**: full refresh and per-file refresh now use independent version counters — clicking refresh can no longer be dropped by a concurrent save-triggered refresh, and multiple files changed at once (terminal batch writes) all get synced
+- **External edits sync**: a workspace file watcher now picks up changes written directly to disk (terminal / external tools), no editor re-save needed
+- **Performance**:
+  - Batch file changes debounce into a single refresh pass (large batches drop from 2 git processes per file to 4 in total)
+  - Full refresh no longer rebuilds the tree view twice
+  - refreshAll reuses cached repository roots
+
 ### 0.2.10
 
 - Updated extension icon (new design)
@@ -75,6 +84,15 @@ All notable changes to Changelists Plus are documented here.
 ---
 
 ## 中文
+
+### 0.2.11
+
+- **刷新同步修复**：全量刷新与单文件刷新改用独立的版本号，互不作废——点击刷新不再被并发的保存刷新丢弃，终端批量写入的多个文件也会全部同步
+- **外部修改同步**：新增工作区文件监听——终端 / 外部工具直接写入磁盘的改动，无需在编辑器内重新保存即可同步到视图
+- **性能优化**：
+  - 批量文件变化合并为一次刷新（大批量时 git 进程数从每文件 2 个降为总共 4 个）
+  - 全量刷新不再重复重建两遍视图树
+  - refreshAll 复用已缓存的仓库根路径
 
 ### 0.2.10
 
