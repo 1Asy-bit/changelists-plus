@@ -16,11 +16,12 @@ import { registerCommands } from './commands';
 let store: ChangelistStore | undefined;
 
 /**
- * 本会话创建的合成 diff 临时文件（diff 视图右侧内容）。
- * 配套清理：视图关闭即删（onDidCloseTextDocument）、deactivate 清残留、
- * 下次启动 TTL 清扫（崩溃残留，见 git.sweepSynthDir）。
+ * 本会话创建的合成 diff 临时文件（diff 视图右侧内容）→ 其所属仓库与相对路径。
+ * 用途有二：视图关闭即删（onDidCloseTextDocument）、deactivate 清残留、
+ * 下次启动 TTL 清扫（崩溃残留，见 git.sweepSynthDir）；以及保存时 3-way merge
+ * 写回原始文件（见 onDidSaveTextDocument 分支）。
  */
-const tempFiles = new Set<string>();
+const tempFileOwners = new Map<string, { repoRoot: string; relPath: string; base: Buffer }>();
 
 /**
  * 文件批量刷新升级阈值：防抖窗口内变化的文件数 ≥ 此值时，不再逐个
@@ -126,8 +127,8 @@ export function activate(context: vscode.ExtensionContext): void {
       const first = detector.snapshot()[0];
       return first ? { repoRoot: first.repoRoot } : undefined;
     },
-    trackTempFile: (p) => {
-      tempFiles.add(p);
+    trackTempFile: (p, owner) => {
+      tempFileOwners.set(p, owner);
     },
   });
 
@@ -167,7 +168,28 @@ export function activate(context: vscode.ExtensionContext): void {
     }, 400);
   };
   context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument((doc) => {
+    vscode.workspace.onDidSaveTextDocument(async (doc) => {
+      if (doc.uri.scheme !== 'file') {
+        return;
+      }
+      const owner = tempFileOwners.get(doc.uri.fsPath);
+      if (owner) {
+        // diff 视图右侧是合成临时文件（HEAD + 该视图的修改）：保存时用 3-way
+        // merge 把编辑结果合并回原始文件——其他视图（default / 其他 changelist）
+        // 的修改在不相邻区域保留；改动重叠则拒绝写回并提示。
+        // 不直接 scheduleFileRefresh(临时文件)：它在 tmp 目录，不属于任何仓库
+        const r = await git.writeBackDiff(
+          owner.repoRoot,
+          owner.relPath,
+          owner.base,
+          Buffer.from(doc.getText(), 'utf8'),
+        );
+        if (!r.ok) {
+          vscode.window.showWarningMessage(t('diffSaveFailed'));
+        }
+        scheduleFileRefresh(path.join(owner.repoRoot, owner.relPath));
+        return;
+      }
       scheduleFileRefresh(doc.uri.fsPath);
     }),
   );
@@ -197,7 +219,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // 只删登记过的合成文件；scheme 必须是 file（head 侧是自定义 scheme，不在此列）
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((doc) => {
-      if (doc.uri.scheme === 'file' && tempFiles.delete(doc.uri.fsPath)) {
+      if (doc.uri.scheme === 'file' && tempFileOwners.delete(doc.uri.fsPath)) {
         try {
           fs.unlinkSync(doc.uri.fsPath);
         } catch {
@@ -286,7 +308,7 @@ export function deactivate(): void {
   // 清理本会话残留的合成 diff 临时文件；仍打开的文档保留——
   // 热退出（hot exit）恢复的 diff 标签页还引用着它们
   const open = new Set(vscode.workspace.textDocuments.map((d) => d.uri.fsPath));
-  for (const p of tempFiles) {
+  for (const p of tempFileOwners.keys()) {
     if (!open.has(p)) {
       try {
         fs.unlinkSync(p);
@@ -295,5 +317,5 @@ export function deactivate(): void {
       }
     }
   }
-  tempFiles.clear();
+  tempFileOwners.clear();
 }

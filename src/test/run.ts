@@ -1432,6 +1432,96 @@ test('并发：多文件 refreshFile 互不作废（终端批量写入）', asyn
   }
 });
 
+// ================= diff 视图保存写回（3-way merge） =================
+
+test('diff 视图写回：编辑后保存，本视图修改应用、其他视图修改保留', async () => {
+  const dir = makeRepo();
+  try {
+    const head = 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n';
+    writeFile(dir, 'f.txt', head);
+    commitAll(dir, 'init');
+    // worktree：line2 改动（A，已分配视图）、line11 改动（B，default）
+    writeFile(dir, 'f.txt', 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nB1\nl12\nl13\nl14\n');
+    const { gitSvc } = newEngine(dir);
+    // 模拟：A 视图合成文件（HEAD + A，base）打开后，用户在视图里把 A1 改成 A2 并保存
+    const base = 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n';
+    const edited = 'l1\nA2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n';
+    const r = await gitSvc.writeBackDiff(dir, 'f.txt', Buffer.from(base, 'utf8'), Buffer.from(edited, 'utf8'));
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.strictEqual(
+      readFile(dir, 'f.txt'),
+      'l1\nA2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nB1\nl12\nl13\nl14\n',
+      'A 的修改应用（A1→A2），B（default）保留',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('diff 视图写回：与工作区其他修改冲突 → 拒绝且原始文件不变', async () => {
+  const dir = makeRepo();
+  try {
+    const head = 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n';
+    writeFile(dir, 'f.txt', head);
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nB1\nl12\nl13\nl14\n');
+    const { gitSvc } = newEngine(dir);
+    // 用户在 A 视图里同时改了 B 所在的行（line11）——与 default 的修改重叠
+    const base = 'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n';
+    const edited = 'l1\nA2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nX\nl12\nl13\nl14\n';
+    const r = await gitSvc.writeBackDiff(dir, 'f.txt', Buffer.from(base, 'utf8'), Buffer.from(edited, 'utf8'));
+    assert.strictEqual(r.ok, false, '冲突必须拒绝写回');
+    assert.strictEqual(
+      readFile(dir, 'f.txt'),
+      'l1\nA1\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nB1\nl12\nl13\nl14\n',
+      '原始文件未被污染（无冲突标记残留）',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('diff 视图写回：未跟踪新文件直接覆盖', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'a.txt', 'a1\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'n.txt', 'hello\n');
+    const { gitSvc } = newEngine(dir);
+    // base = 合成时内容（即新文件内容）；编辑后追加一行
+    const r = await gitSvc.writeBackDiff(
+      dir,
+      'n.txt',
+      Buffer.from('hello\n', 'utf8'),
+      Buffer.from('hello\nworld\n', 'utf8'),
+    );
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.strictEqual(readFile(dir, 'n.txt'), 'hello\nworld\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('diff 视图写回：worktree 文件已删除 → 失败', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'f.txt', 'l1\nl2\n');
+    commitAll(dir, 'init');
+    writeFile(dir, 'f.txt', 'l1\nX\nl2\n');
+    fs.rmSync(path.join(dir, 'f.txt'));
+    const { gitSvc } = newEngine(dir);
+    const r = await gitSvc.writeBackDiff(
+      dir,
+      'f.txt',
+      Buffer.from('l1\nX\nl2\n', 'utf8'),
+      Buffer.from('l1\nY\nl2\n', 'utf8'),
+    );
+    assert.strictEqual(r.ok, false, 'worktree 文件不存在必须失败而非凭空创建');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ================= -U0 块级拆分 =================
 
 test('U0: 间隔 1 行的改动拆分为两个 hunk（近距拆分核心回归）', async () => {

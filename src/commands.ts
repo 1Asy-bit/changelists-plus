@@ -4,6 +4,7 @@
  * Unassigned 下的文件 = 未分配的 hunks，changelist 下的文件 = 该 changelist 的 hunks。
  */
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import * as path from 'path';
 import { realpathSafe, type ChangeDetector } from './changeDetector';
 import type { ChangelistStore } from './changelistStore';
@@ -33,8 +34,15 @@ export interface CommandDeps {
   refreshAll: () => Promise<void>;
   /** 当前活动仓库（活动编辑器所在仓库，否则第一个） */
   activeRepo: () => Promise<{ repoRoot: string } | undefined>;
-  /** 登记新创建的合成临时文件（diff 视图关闭时由扩展层自动清理） */
-  trackTempFile: (path: string) => void;
+  /**
+   * 登记新创建的合成临时文件（diff 视图右侧）及其所属仓库/相对路径/打开时内容——
+   * 视图关闭时由扩展层自动清理；保存时用 3-way merge 写回原始文件
+   * （base = 打开时内容，见 GitService.writeBackDiff）
+   */
+  trackTempFile: (
+    path: string,
+    owner: { repoRoot: string; relPath: string; base: Buffer },
+  ) => void;
 }
 
 export function registerCommands(context: vscode.ExtensionContext, deps: CommandDeps): void {
@@ -60,7 +68,9 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       const tmp = await deps.git.applyPatchToTempFile(repoRoot, relPath, built.patch, view);
       if (tmp) {
         right = vscode.Uri.file(tmp);
-        deps.trackTempFile(tmp);
+        // base = 合成文件打开时的内容（HEAD + 本视图 hunks），保存写回时
+        // 3-way merge 需要它作三方合并的基准
+        deps.trackTempFile(tmp, { repoRoot, relPath, base: fs.readFileSync(tmp) });
       }
     }
     // 标题带视图名（default / changelist 名），多个 diff 标签页能区分

@@ -56,6 +56,7 @@ const zh: Record<string, string> = {
   discardConfirmAction: '撤销',
   discardSuccess: '已撤销 {0} 处修改',
   discardStagedSyncFailed: '已撤销工作区改动，但 index 中部分已暂存状态同步失败，可能残留（可用 git reset 清理）',
+  diffSaveFailed: '无法把 diff 视图的修改写回原始文件：与工作区其他修改冲突，或文件已变化',
 };
 
 const en: Record<string, string> = {
@@ -110,6 +111,7 @@ const en: Record<string, string> = {
   discardConfirmAction: 'Discard',
   discardSuccess: 'Discarded {0} change(s)',
   discardStagedSyncFailed: 'Worktree changes discarded, but syncing the staged state failed; stale entries may remain (use git reset to clean up)',
+  diffSaveFailed: 'Could not write the diff view changes back to the file: it conflicts with other changes in the working tree, or the file changed',
 };
 
 let lang: 'zh' | 'en' = 'en';
