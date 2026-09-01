@@ -355,17 +355,12 @@ async function guardRepo(
   git: GitService,
   repoRoot: string,
 ): Promise<'mergeInProgress' | 'unmerged' | 'noHead' | null> {
-  // 全部检查并行（5 个状态文件 + unmerged + HEAD），低配机省掉串行排队；
-  // 结果按原优先级返回（merge 状态 > 冲突 > unborn），语义不变
+  // 全部检查并行（状态文件一次 rev-parse 取全部 + unmerged + HEAD），
+  // 低配机省掉串行排队；结果按原优先级返回（merge 状态 > 冲突 > unborn），语义不变
   const [inProgress, unmerged, headExists] = await Promise.all([
-    (async () => {
-      const found = await Promise.all(
-        ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply'].map((name) =>
-          git.guardPathExists(repoRoot, name),
-        ),
-      );
-      return found.some(Boolean);
-    })(),
+    git
+      .guardPathsExist(repoRoot, ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply'])
+      .then((found) => found.some(Boolean)),
     git.hasUnmerged(repoRoot),
     git.headExists(repoRoot),
   ]);
@@ -386,9 +381,14 @@ async function guardRepo(
  * 内容哈希与视图完全一致，保证匹配结果一致。
  */
 async function freshDiff(git: GitService, repoRoot: string): Promise<FileChange[]> {
-  const fresh: FileChange[] = parseGitDiff(await git.diffWorktree(repoRoot));
+  // diffWorktree 与 untrackedFiles 互不依赖，并行省 1 轮 git 进程
+  const [diffText, untracked] = await Promise.all([
+    git.diffWorktree(repoRoot),
+    git.untrackedFiles(repoRoot),
+  ]);
+  const fresh: FileChange[] = parseGitDiff(diffText);
   const freshPaths = new Set(fresh.map((f) => f.path));
-  for (const rel of await git.untrackedFiles(repoRoot)) {
+  for (const rel of untracked) {
     if (freshPaths.has(rel)) {
       continue;
     }
@@ -570,16 +570,22 @@ export type StageResult =
  * fresh 可选：调用方（stageChangelist / stageUnassigned）收集记录时已算过全量
  * freshDiff，直接传入复用——同一批次内 worktree 无写入，两遍全量 diff 结果相同，
  * 低配机 / 大仓库下避免重复扫描。未传时自己算（stageHunk 等单文件入口）。
+ * guarded 可选：调用方已跑过 guardRepo（stageChangelist / stageUnassigned 都在
+ * 收集 fresh 前 guard 过）时传 true，跳过内部重复 guard——guardRepo 一次
+ * 3 个 git 进程，每次暂存都省一轮。未传（false）保持内部 guard（stageHunk）。
  */
 export async function stageRecords(
   git: GitService,
   repoRoot: string,
   records: Map<string, StoredHunk[]>,
   fresh?: FileChange[],
+  guarded = false,
 ): Promise<StageResult> {
-  const guardErr = await guardRepo(git, repoRoot);
-  if (guardErr) {
-    return { ok: false, error: guardErr };
+  if (!guarded) {
+    const guardErr = await guardRepo(git, repoRoot);
+    if (guardErr) {
+      return { ok: false, error: guardErr };
+    }
   }
   const freshChanges = fresh ?? (await freshDiff(git, repoRoot));
   // 已暂存的 hunk 不再重复应用（幂等 no-op）——避免对已 staged 内容 apply 报"改动已变化"；
@@ -681,8 +687,9 @@ export async function stageUnassigned(
   if (records.size === 0) {
     return { ok: false, error: 'empty' };
   }
-  // fresh 复用：收集与 stageRecords 各算一遍全量 diff 是同一内容
-  return stageRecords(git, repoRoot, records, fresh);
+  // fresh 复用：收集与 stageRecords 各算一遍全量 diff 是同一内容；
+  // guarded 复用：上方已 guardRepo，stageRecords 内不再重复跑
+  return stageRecords(git, repoRoot, records, fresh, true);
 }
 
 /** 暂存一个 changelist 的全部当前 hunks */
@@ -702,8 +709,9 @@ export async function stageChangelist(opts: {
   if (records.size === 0) {
     return { ok: false, error: 'empty' };
   }
-  // fresh 复用 + 走 stageRecords 的「已暂存 hunk 过滤」逻辑（重复暂存 → 幂等 no-op）
-  return stageRecords(git, repoRoot, records, fresh);
+  // fresh 复用 + 走 stageRecords 的「已暂存 hunk 过滤」逻辑（重复暂存 → 幂等 no-op）；
+  // guarded 复用：上方已 guardRepo，stageRecords 内不再重复跑
+  return stageRecords(git, repoRoot, records, fresh, true);
 }
 
 // ================= 撤销（discard，按视图） =================

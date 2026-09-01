@@ -1240,6 +1240,39 @@ test('git: headFileContent 返回 HEAD 原始字节，未跟踪返回 null', asy
   }
 });
 
+test('git: guardPathsExist 批量状态检查（一次 rev-parse 取全部路径）', async () => {
+  const dir = makeRepo();
+  try {
+    writeFile(dir, 'a.txt', 'x\n');
+    commitAll(dir, 'init');
+    const gitSvc = new GitService(GIT);
+    const names = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply'];
+    // 正常仓库：全部不存在
+    assert.deepStrictEqual(await gitSvc.guardPathsExist(dir, names), names.map(() => false));
+    // 空数组：直接返回，不跑进程
+    assert.deepStrictEqual(await gitSvc.guardPathsExist(dir, []), []);
+    // 制造 merge 状态：仅 MERGE_HEAD 存在
+    fs.writeFileSync(path.join(dir, '.git', 'MERGE_HEAD'), 'deadbeef\n');
+    const found = await gitSvc.guardPathsExist(dir, names);
+    assert.strictEqual(found[0], true);
+    assert.deepStrictEqual(found.slice(1), [false, false, false, false]);
+    fs.rmSync(path.join(dir, '.git', 'MERGE_HEAD'));
+    // rebase-merge 是目录：同样能探测
+    fs.mkdirSync(path.join(dir, '.git', 'rebase-merge'));
+    const found2 = await gitSvc.guardPathsExist(dir, names);
+    assert.strictEqual(found2[3], true);
+    // 非仓库目录：全部 false（rev-parse 失败）
+    const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-norepo-'));
+    try {
+      assert.deepStrictEqual(await gitSvc.guardPathsExist(notRepo, names), names.map(() => false));
+    } finally {
+      fs.rmSync(notRepo, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('git: diffStaged 支持 pathspec 限制（只输出指定文件）', async () => {
   const dir = makeRepo();
   try {
