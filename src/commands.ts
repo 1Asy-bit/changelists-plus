@@ -47,6 +47,18 @@ export interface CommandDeps {
   ) => void;
 }
 
+/**
+ * 内置 SCM"更改"区的刷新由 VS Code git extension 的 index watcher 驱动（自带
+ * 防抖延迟）——stage 后它要等一会儿才重新加载。主动触发 git extension 的刷新
+ * 命令，让"更改"区与我们的树同步更新；未启用内置 git 扩展时静默忽略。
+ */
+function refreshGitScm(): void {
+  void vscode.commands.executeCommand('git.refresh').then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
 export function registerCommands(context: vscode.ExtensionContext, deps: CommandDeps): void {
   const register = (id: string, fn: (...args: any[]) => unknown): void => {
     context.subscriptions.push(vscode.commands.registerCommand(id, fn));
@@ -328,8 +340,10 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       }
       vscode.window.showErrorMessage(t(result.error === 'empty' ? 'noAssignableHunks' : errorText(result.error)));
     }
-    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存
+    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存；
+    // 内置 SCM"更改"区由其 index watcher 驱动（有防抖）——主动 git.refresh 同步更新
     void deps.refreshStaged();
+    refreshGitScm();
   });
 
   /** default（未分配）节点：撤销其下全部修改（其他视图的修改不受影响） */
@@ -425,8 +439,10 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       }
       vscode.window.showErrorMessage(t(result.error === 'empty' ? 'noAssignableHunks' : errorText(result.error)));
     }
-    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存
+    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存；
+    // 内置 SCM"更改"区由其 index watcher 驱动（有防抖）——主动 git.refresh 同步更新
     void deps.refreshStaged();
+    refreshGitScm();
   });
 
   register('changelistsPlus.stageHunk', async (node?: TreeNode, ...others: TreeNode[]) => {
@@ -464,8 +480,10 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
         staged === 0 ? t('alreadyStaged') : t('stageSuccess', staged),
       );
     }
-    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存
+    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存；
+    // 内置 SCM"更改"区由其 index watcher 驱动（有防抖）——主动 git.refresh 同步更新
     void deps.refreshStaged();
+    refreshGitScm();
   });
 
   register('changelistsPlus.moveToChangelist', async (node?: TreeNode, ...others: TreeNode[]) => {
