@@ -12,7 +12,7 @@ import * as path from 'path';
 import { ChangeDetector, FileModel, RepoModel, StageState, stageStateOf, combineStageStates } from './changeDetector';
 import type { ChangelistStore } from './changelistStore';
 import type { Hunk } from './diffParser';
-import { resolveDropTargetId } from './dndTarget';
+import { resolveDropTargetId, resolveReorderAfterId } from './dndTarget';
 import { t } from './i18n';
 
 const DRAG_MIME = 'application/vnd.code.tree.changelistsplus';
@@ -265,14 +265,26 @@ export class ChangelistDragAndDrop implements vscode.TreeDragAndDropController<T
   ) {}
 
   handleDrag(source: readonly TreeNode[], dataTransfer: vscode.DataTransfer): void {
-    const payloads = source
+    // 两类拖拽共用同一 mime，payload 项按 type 区分：
+    // - file：移动该视图下的 hunks 到目标视图（现有行为）
+    // - changelist：把 changelist 排到目标之后（排序，见 handleDrop）
+    const filePayloads = source
       .filter((n) => n.kind === 'file')
       .map((n) => ({
+        type: 'file' as const,
         repoRoot: n.repoRoot,
         filePath: n.filePath,
         // 拖的是哪个视图下的文件 → 只移动该视图的 hunks
         view: n.contextValue === 'unassignedFile' ? ('unassigned' as const) : (n.changelistId ?? ('unassigned' as const)),
       }));
+    const clPayloads = source
+      .filter((n) => n.kind === 'changelist')
+      .map((n) => ({
+        type: 'changelist' as const,
+        repoRoot: n.repoRoot,
+        changelistId: n.changelistId ?? '',
+      }));
+    const payloads = [...clPayloads, ...filePayloads];
     if (payloads.length > 0) {
       dataTransfer.set(DRAG_MIME, new vscode.DataTransferItem(JSON.stringify(payloads)));
     }
@@ -290,32 +302,45 @@ export class ChangelistDragAndDrop implements vscode.TreeDragAndDropController<T
     if (!item) {
       return;
     }
-    const resolved = resolveDropTargetId(target);
-    if (!resolved) {
-      return;
-    }
-    const { id: targetId, name: targetName } = resolved;
-    const payloads = JSON.parse(String(item.value)) as Array<{
-      repoRoot: string;
-      filePath: string;
-      view: string;
-    }>;
-    for (const p of payloads) {
-      // 跨仓库拖拽：changelist 按仓库存储，目标 id 在其他仓库不存在时
-      // 自动创建同名 changelist（IDEA 式行为），避免写入"幽灵 changelist id"孤儿数据
-      let id = targetId;
-      if (id !== null && !this.store.changelistsOf(p.repoRoot).some((c) => c.id === id)) {
-        id = this.store.createChangelist(p.repoRoot, targetName).id;
+    const payloads = JSON.parse(String(item.value)) as Array<
+      | { type: 'file'; repoRoot: string; filePath: string; view: string }
+      | { type: 'changelist'; repoRoot: string; changelistId: string }
+    >;
+    // 排序从后往前执行，多选 changelist 的拖放结果保持选择顺序
+    // （每次都插到目标紧后，先处理最后的，前面的依次插回其前）
+    const clItems = payloads.filter((p) => p.type === 'changelist');
+    const afterId = resolveReorderAfterId(target);
+    if (afterId !== undefined) {
+      for (let i = clItems.length - 1; i >= 0; i--) {
+        const p = clItems[i];
+        if (p.type === 'changelist' && p.changelistId) {
+          this.store.reorderChangelist(p.repoRoot, p.changelistId, afterId);
+        }
       }
-      const model = this.detector.getModel(p.repoRoot);
-      const f = model?.files.find((fm) => fm.change.path === p.filePath);
-      const records = f
-        ? f.hunks
-            .filter((h) => (p.view === 'unassigned' ? h.ownerId === null : h.ownerId === p.view))
-            .map((h) => ({ id: h.hunk.id, oldStart: h.hunk.oldStart, oldLines: h.hunk.oldLines }))
-        : [];
-      if (records.length > 0) {
-        this.store.setHunkOwners(p.repoRoot, p.filePath, records, id);
+    }
+    const resolved = resolveDropTargetId(target);
+    if (resolved) {
+      const { id: targetId, name: targetName } = resolved;
+      for (const p of payloads) {
+        if (p.type !== 'file') {
+          continue;
+        }
+        // 跨仓库拖拽：changelist 按仓库存储，目标 id 在其他仓库不存在时
+        // 自动创建同名 changelist（IDEA 式行为），避免写入"幽灵 changelist id"孤儿数据
+        let id = targetId;
+        if (id !== null && !this.store.changelistsOf(p.repoRoot).some((c) => c.id === id)) {
+          id = this.store.createChangelist(p.repoRoot, targetName).id;
+        }
+        const model = this.detector.getModel(p.repoRoot);
+        const f = model?.files.find((fm) => fm.change.path === p.filePath);
+        const records = f
+          ? f.hunks
+              .filter((h) => (p.view === 'unassigned' ? h.ownerId === null : h.ownerId === p.view))
+              .map((h) => ({ id: h.hunk.id, oldStart: h.hunk.oldStart, oldLines: h.hunk.oldLines }))
+          : [];
+        if (records.length > 0) {
+          this.store.setHunkOwners(p.repoRoot, p.filePath, records, id);
+        }
       }
     }
     this.onAssign();

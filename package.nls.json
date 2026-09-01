@@ -13,6 +13,8 @@
   "changelistsPlus.command.discardUnassigned": "Discard Changes",
   "changelistsPlus.command.openFile": "Open File",
   "changelistsPlus.command.discardFile": "Discard Changes",
+  "changelistsPlus.command.moveChangelistUp": "Move Up",
+  "changelistsPlus.command.moveChangelistDown": "Move Down",
   "changelistsPlus.command.moveToChangelist": "Move to Changelist…",
   "changelistsPlus.command.assignSelection": "Assign Selected Changes to Changelist…",
   "changelistsPlus.config.gitPath": "Path to the git executable (default: \"git\")"

@@ -198,6 +198,25 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     deps.store.deleteChangelist(cl.repoRoot, cl.id);
   });
 
+  // 排序：上移/下移（右键菜单，不增加行内按钮）。拖放排序保留（VS Code 拖放
+  // 悬停会自动展开目标 changelist，平台行为无法禁用——菜单命令作为不展开的替代）。
+  // 注意用相邻交换（moveChangelistBy）：reorderChangelist 是"排到目标之后"，
+  // 最下方的 changelist 上移时其本就紧邻前一格之后，reorder 会放回原位（无效）。
+  const moveChangelist =
+    (dir: 'up' | 'down') =>
+    async (node?: TreeNode): Promise<void> => {
+      if (!ensureTrusted()) {
+        return;
+      }
+      const cl = findChangelist(deps, node);
+      if (!cl) {
+        return;
+      }
+      deps.store.moveChangelistBy(cl.repoRoot, cl.id, dir);
+    };
+  register('changelistsPlus.moveChangelistUp', moveChangelist('up'));
+  register('changelistsPlus.moveChangelistDown', moveChangelist('down'));
+
   register('changelistsPlus.commitChangelist', async (node?: TreeNode) => {
     if (!ensureTrusted()) {
       return;

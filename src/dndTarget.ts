@@ -34,3 +34,28 @@ export function resolveDropTargetId(
   }
   return undefined;
 }
+
+/**
+ * changelist 排序目标解析：返回 afterId（被拖的 changelist 排到 afterId 之后；
+ * null = 排到列表首位）。undefined = 该目标不可放置（忽略）。
+ *
+ * 语义：拖 A 到 changelist B 上 = A 排到 B 之后；拖到 default / repo 行 / 树空白 =
+ * 排到首位（default 渲染在 changelist 列表之前，其"之后"正是列表首位）；
+ * 拖到文件行上 = 其所在视图（default 下 → 首位，changelist 下 → 该 changelist 之后）。
+ */
+export function resolveReorderAfterId(
+  target:
+    | { kind: string; contextValue: string; changelistId?: string }
+    | undefined,
+): string | null | undefined {
+  if (!target || target.kind === 'unassigned' || target.kind === 'repo') {
+    return null;
+  }
+  if (target.kind === 'changelist') {
+    return target.changelistId ?? null;
+  }
+  if (target.kind === 'file') {
+    return target.contextValue === 'unassignedFile' ? null : (target.changelistId ?? null);
+  }
+  return undefined;
+}

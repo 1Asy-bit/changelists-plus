@@ -67,6 +67,14 @@
         "icon": "$(trash)"
       },
       {
+        "command": "changelistsPlus.moveChangelistUp",
+        "title": "%changelistsPlus.command.moveChangelistUp%"
+      },
+      {
+        "command": "changelistsPlus.moveChangelistDown",
+        "title": "%changelistsPlus.command.moveChangelistDown%"
+      },
+      {
         "command": "changelistsPlus.discardChangelist",
         "title": "%changelistsPlus.command.discardChangelist%",
         "icon": "$(discard)"
@@ -160,6 +168,16 @@
           "group": "changelistsPlus@5"
         },
         {
+          "command": "changelistsPlus.moveChangelistUp",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "changelistsPlus@6"
+        },
+        {
+          "command": "changelistsPlus.moveChangelistDown",
+          "when": "view == changelistsPlus && viewItem == changelist",
+          "group": "changelistsPlus@7"
+        },
+        {
           "command": "changelistsPlus.commitChangelist",
           "when": "view == changelistsPlus && viewItem == changelist",
           "group": "inline@1"
@@ -249,6 +267,14 @@
         },
         {
           "command": "changelistsPlus.deleteChangelist",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.moveChangelistUp",
+          "when": "false"
+        },
+        {
+          "command": "changelistsPlus.moveChangelistDown",
           "when": "false"
         },
         {

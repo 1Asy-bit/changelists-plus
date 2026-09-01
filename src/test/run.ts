@@ -32,7 +32,7 @@ import {
   stageUnassigned,
 } from '../commitEngine';
 import { ChangeDetector, combineStageStates, stageStateOf } from '../changeDetector';
-import { resolveDropTargetId } from '../dndTarget';
+import { resolveDropTargetId, resolveReorderAfterId } from '../dndTarget';
 
 const GIT = 'git';
 
@@ -347,6 +347,107 @@ test('store: 分配/移动/删除/持久化/损坏恢复', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('store: reorderChangelist——移到目标之后 / 首位 / 自身不变 / 持久化', () => {
+  const dir = makeRepo();
+  try {
+    const storage = path.join(dir, 'store.json');
+    const store = new ChangelistStore(storage);
+    const names = ['A', 'B', 'C', 'D'];
+    const ids = names.map((n) => store.createChangelist(dir, n).id);
+    const order = () => store.changelistsOf(dir).map((c) => c.name).join(',');
+
+    // 拖 C 到 A 上 → C 排到 A 之后
+    store.reorderChangelist(dir, ids[2], ids[0]);
+    assert.strictEqual(order(), 'A,C,B,D');
+    // 拖 D 到首位
+    store.reorderChangelist(dir, ids[3], null);
+    assert.strictEqual(order(), 'D,A,C,B');
+    // 拖到自身 → 无变化
+    store.reorderChangelist(dir, ids[0], ids[0]);
+    assert.strictEqual(order(), 'D,A,C,B');
+    // fromId 不存在 → 无变化
+    store.reorderChangelist(dir, 'nope', ids[1]);
+    assert.strictEqual(order(), 'D,A,C,B');
+    // afterId 不存在（跨仓库目标）→ 移到首位
+    store.reorderChangelist(dir, ids[2], 'ghost');
+    assert.strictEqual(order(), 'C,D,A,B');
+    // 拖 B 到 D 上 → B 排到 D 之后
+    store.reorderChangelist(dir, ids[1], ids[3]);
+    assert.strictEqual(order(), 'C,D,B,A');
+    // 拖 B 到 C 上 → B 排到 C 之后
+    store.reorderChangelist(dir, ids[1], ids[2]);
+    assert.strictEqual(order(), 'C,B,D,A');
+
+    // 持久化
+    store.flush();
+    const store2 = new ChangelistStore(storage);
+    assert.strictEqual(store2.changelistsOf(dir).map((c) => c.name).join(','), 'C,B,D,A');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('store: moveChangelistBy 相邻交换——最下方上移 / 最上方下移 / 边界无操作', () => {
+  const dir = makeRepo();
+  try {
+    const store = new ChangelistStore(path.join(dir, 'store.json'));
+    const ids = ['A', 'B', 'C', 'D'].map((n) => store.createChangelist(dir, n).id);
+    const order = () => store.changelistsOf(dir).map((c) => c.name).join(',');
+
+    // 最下方 D 上移 → 与 C 交换（reorderChangelist 在此场景会放回原位，回归）
+    store.moveChangelistBy(dir, ids[3], 'up');
+    assert.strictEqual(order(), 'A,B,D,C');
+    // D 再上移 → 与 B 交换
+    store.moveChangelistBy(dir, ids[3], 'up');
+    assert.strictEqual(order(), 'A,D,B,C');
+    // D 再上移 → 与 A 交换
+    store.moveChangelistBy(dir, ids[3], 'up');
+    assert.strictEqual(order(), 'D,A,B,C');
+    // D 在最上方再上移 → 无操作
+    store.moveChangelistBy(dir, ids[3], 'up');
+    assert.strictEqual(order(), 'D,A,B,C');
+    // A 下移 → 与 B 交换（A 下方是 B，不是 D）
+    store.moveChangelistBy(dir, ids[0], 'down');
+    assert.strictEqual(order(), 'D,B,A,C');
+    // 不存在的 id → 无操作
+    store.moveChangelistBy(dir, 'nope', 'up');
+    assert.strictEqual(order(), 'D,B,A,C');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dnd: 排序目标解析 resolveReorderAfterId——changelist 之后 / default 与 repo 首位', () => {
+  assert.strictEqual(resolveReorderAfterId(undefined), null); // 树空白 → 首位
+  assert.strictEqual(
+    resolveReorderAfterId({ kind: 'changelist', contextValue: 'changelist', changelistId: 'x1' }),
+    'x1',
+  );
+  assert.strictEqual(
+    resolveReorderAfterId({ kind: 'changelist', contextValue: 'changelist' }),
+    null, // changelistId 缺失（防御）→ 首位
+  );
+  assert.strictEqual(
+    resolveReorderAfterId({ kind: 'unassigned', contextValue: 'unassigned' }),
+    null, // default → 首位
+  );
+  assert.strictEqual(
+    resolveReorderAfterId({ kind: 'repo', contextValue: 'repo' }),
+    null, // repo 行 → 该仓库首位
+  );
+  // 文件行 = 其所在视图
+  assert.strictEqual(
+    resolveReorderAfterId({ kind: 'file', contextValue: 'unassignedFile' }),
+    null, // default 下文件 → 首位
+  );
+  assert.strictEqual(
+    resolveReorderAfterId({ kind: 'file', contextValue: 'file', changelistId: 'x2' }),
+    'x2',
+  );
+  // 不可放置
+  assert.strictEqual(resolveReorderAfterId({ kind: 'message', contextValue: 'message' }), undefined);
 });
 
 // ================= engine =================

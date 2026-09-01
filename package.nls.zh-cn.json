@@ -13,6 +13,8 @@
   "changelistsPlus.command.discardUnassigned": "撤销改动",
   "changelistsPlus.command.openFile": "打开文件",
   "changelistsPlus.command.discardFile": "撤销修改",
+  "changelistsPlus.command.moveChangelistUp": "上移",
+  "changelistsPlus.command.moveChangelistDown": "下移",
   "changelistsPlus.command.moveToChangelist": "移动到 Changelist…",
   "changelistsPlus.command.assignSelection": "把选中改动分配到 Changelist…",
   "changelistsPlus.config.gitPath": "git 可执行文件路径（默认 \"git\"）"

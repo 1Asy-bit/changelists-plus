@@ -229,6 +229,54 @@ export class ChangelistStore extends EventEmitter {
     this.save();
   }
 
+  /**
+   * 相邻交换（右键菜单"上移/下移"用）：把 fromId 与紧邻的 changelist 交换。
+   * 注意与 reorderChangelist 的语义区别：reorder 是"排到目标之后"（拖放），
+   * from 原本紧邻目标之后时结果不变；上移/下移必须交换相邻元素，用本方法。
+   */
+  moveChangelistBy(repoRoot: string, fromId: string, dir: 'up' | 'down'): void {
+    const list = this.repo(repoRoot).changelists;
+    const idx = list.findIndex((c) => c.id === fromId);
+    if (idx < 0) {
+      return;
+    }
+    const other = idx + (dir === 'up' ? -1 : 1);
+    if (other < 0 || other >= list.length) {
+      return; // 已在边界
+    }
+    const tmp = list[idx];
+    list[idx] = list[other];
+    list[other] = tmp;
+    this.emitChange();
+    this.save();
+  }
+
+  /**
+   * 排序：把 fromId 的 changelist 移到 afterId 之后；afterId 为 null 时移到列表首位。
+   * 列表顺序即树视图渲染顺序。fromId 不存在或 fromId === afterId 时不操作；
+   * afterId 不存在（如跨仓库拖到另一个仓库的 changelist 上）→ 移到首位（防御）。
+   * 注意：from 原本紧邻 afterId 之后时结果不变（已在该位置）——拖放语义如此。
+   */
+  reorderChangelist(repoRoot: string, fromId: string, afterId: string | null): void {
+    if (fromId === afterId) {
+      return;
+    }
+    const list = this.repo(repoRoot).changelists;
+    const fromIdx = list.findIndex((c) => c.id === fromId);
+    if (fromIdx < 0) {
+      return;
+    }
+    const [from] = list.splice(fromIdx, 1);
+    const at = afterId === null ? -1 : list.findIndex((c) => c.id === afterId);
+    if (at < 0) {
+      list.unshift(from);
+    } else {
+      list.splice(at + 1, 0, from);
+    }
+    this.emitChange();
+    this.save();
+  }
+
   /** 直接移除记录（stale 清理用）。不触发 change 事件——调用方随后会刷新。 */
   removeRecords(repoRoot: string, filePath: string, ids: string[]): void {
     const idSet = new Set(ids);
