@@ -32,6 +32,7 @@ import {
   stageUnassigned,
 } from '../commitEngine';
 import { ChangeDetector, combineStageStates, stageStateOf } from '../changeDetector';
+import { resolveDropTargetId } from '../dndTarget';
 
 const GIT = 'git';
 
@@ -1723,6 +1724,53 @@ test('staged: stageStateOf / combineStageStates 纯函数边界', () => {
   assert.strictEqual(combineStageStates(['none', 'none']), 'none');
   assert.strictEqual(combineStageStates(['all', 'none']), 'partial');
   assert.strictEqual(combineStageStates(['partial', 'all']), 'partial');
+});
+
+test('dnd: 拖放目标解析——default 节点 / 空白 → null（回 default）', () => {
+  assert.deepStrictEqual(resolveDropTargetId(undefined), { id: null, name: '' });
+  assert.deepStrictEqual(
+    resolveDropTargetId({ kind: 'unassigned', contextValue: 'unassigned' }),
+    { id: null, name: '' },
+  );
+});
+
+test('dnd: 拖放目标解析——changelist 节点 → 其 id', () => {
+  assert.deepStrictEqual(
+    resolveDropTargetId({ kind: 'changelist', contextValue: 'changelist', label: 'c1', changelistId: 'x1' }),
+    { id: 'x1', name: 'c1' },
+  );
+  // changelistId 缺失（防御）→ 按 default 处理
+  assert.deepStrictEqual(
+    resolveDropTargetId({ kind: 'changelist', contextValue: 'changelist' }),
+    { id: null, name: '' },
+  );
+});
+
+test('dnd: 拖放目标解析——文件行 = 其所在视图（拖到 default 区块内文件上 = 回 default 回归）', () => {
+  // 本次 bug 修复核心：VS Code 的 drop 目标是鼠标下最深节点，
+  // 拖到 default 区块内的文件行上应视为拖到 default
+  assert.deepStrictEqual(
+    resolveDropTargetId({ kind: 'file', contextValue: 'unassignedFile', changelistId: undefined }),
+    { id: null, name: '' },
+  );
+  // changelist 下的文件行 → 该 changelist
+  assert.deepStrictEqual(
+    resolveDropTargetId({ kind: 'file', contextValue: 'file', changelistId: 'x2' }),
+    { id: 'x2', name: '' },
+  );
+  // 文件行 changelistId 缺失 → 按 default
+  assert.deepStrictEqual(
+    resolveDropTargetId({ kind: 'file', contextValue: 'file' }),
+    { id: null, name: '' },
+  );
+});
+
+test('dnd: 拖放目标解析——repo 行 = 该仓库 default；不可放置节点 → undefined', () => {
+  assert.deepStrictEqual(
+    resolveDropTargetId({ kind: 'repo', contextValue: 'repo' }),
+    { id: null, name: '' },
+  );
+  assert.strictEqual(resolveDropTargetId({ kind: 'message', contextValue: 'message' }), undefined);
 });
 
 test('staged: refreshRepo 缓存只含真正暂存的 hunk', async () => {

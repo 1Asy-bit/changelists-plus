@@ -12,6 +12,7 @@ import * as path from 'path';
 import { ChangeDetector, FileModel, RepoModel, StageState, stageStateOf, combineStageStates } from './changeDetector';
 import type { ChangelistStore } from './changelistStore';
 import type { Hunk } from './diffParser';
+import { resolveDropTargetId } from './dndTarget';
 import { t } from './i18n';
 
 const DRAG_MIME = 'application/vnd.code.tree.changelistsplus';
@@ -289,16 +290,11 @@ export class ChangelistDragAndDrop implements vscode.TreeDragAndDropController<T
     if (!item) {
       return;
     }
-    let targetId: string | null;
-    let targetName = '';
-    if (target && target.kind === 'changelist') {
-      targetId = target.changelistId ?? null;
-      targetName = target.label;
-    } else if (!target || target.kind === 'unassigned') {
-      targetId = null;
-    } else {
+    const resolved = resolveDropTargetId(target);
+    if (!resolved) {
       return;
     }
+    const { id: targetId, name: targetName } = resolved;
     const payloads = JSON.parse(String(item.value)) as Array<{
       repoRoot: string;
       filePath: string;
