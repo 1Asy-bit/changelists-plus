@@ -8,6 +8,14 @@ All notable changes to Changelists Plus are documented here.
 
 ## English
 
+### 0.2.12
+
+- **Changelist reordering**: drag a custom changelist onto another one to move it right after it, or onto `default` / empty space to move it to the top — multi-select drag keeps the selection order; "Move Up / Move Down" at the bottom of the context menu fine-tunes positions
+- **Faster staging**:
+  - `default` / changelist staging no longer runs the merge-state guard twice — the duplicate `git` guard pass was removed from the staging pipeline
+  - The 5 state-file existence checks (merge / cherry-pick / revert / rebase) are batched into a single `git rev-parse`, and worktree diff + untracked scan now run in parallel — staging a changelist drops from ~7 serial git round-trips to ~5 and from ~20 processes to ~9
+- `default` row count now shows the number of modified files, consistent with custom changelist rows
+
 ### 0.2.11
 
 - **Refresh sync fix**: full refresh and per-file refresh now use independent version counters — clicking refresh can no longer be dropped by a concurrent save-triggered refresh, and multiple files changed at once (terminal batch writes) all get synced
@@ -84,6 +92,14 @@ All notable changes to Changelists Plus are documented here.
 ---
 
 ## 中文
+
+### 0.2.12
+
+- **Changelist 排序**：支持拖动自定义 changelist 排序——拖到某个 changelist 上即排到其后，拖到 `default` 或空白处即排到首位，多选拖动保持原有顺序；右键菜单最下方的"上移 / 下移"可精确调整位置
+- **暂存更快**：
+  - `default` / changelist 暂存不再重复执行合并状态守卫——暂存链路中重复的一轮 `git` 守卫进程已移除
+  - 5 个状态文件（merge / cherry-pick / revert / rebase）存在性检查合并为单次 `git rev-parse`，worktree diff 与未跟踪文件扫描改为并行——暂存一个 changelist 的 git 串行轮数从 ~7 降为 ~5，进程数从 ~20 降为 ~9
+- `default` 行显示的数字改为被修改的文件数，与自定义 changelist 行一致
 
 ### 0.2.11
 
