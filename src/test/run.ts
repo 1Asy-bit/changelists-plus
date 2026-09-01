@@ -863,10 +863,20 @@ test('engine: 暂存指定记录（stageRecords）——只暂存选中的 hunk'
     );
     assert.ok(r.ok, JSON.stringify(r));
     assert.ok(r.ok && r.stagedCount === 1);
+    // stagedIds 返回本次实际应用的 hunk（乐观更新数据源）
+    assert.ok(r.ok && r.stagedIds.get('f.txt')?.has(hunkA.id));
     const staged = parseGitDiff(await gitSvc.diffStaged(dir));
     assert.strictEqual(staged.length, 1);
     assert.strictEqual(staged[0].hunks.length, 1);
     assert.strictEqual(staged[0].hunks[0].id, hunkA.id);
+    // 幂等重复暂存：stagedCount 0、stagedIds 空（全部已暂存）
+    const r2 = await stageRecords(
+      gitSvc,
+      dir,
+      new Map([['f.txt', [{ id: hunkA.id, oldStart: hunkA.oldStart, oldLines: hunkA.oldLines }]]]),
+    );
+    assert.ok(r2.ok && r2.stagedCount === 0);
+    assert.ok(r2.ok && r2.stagedIds.size === 0);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1997,6 +2007,45 @@ test('staged: refreshStagedOnly 只重算暂存状态（stage 命令尾部轻量
     // 未初始化的 root：no-op 不抛
     const det2 = new ChangeDetector(gitSvc, store, () => [dir]);
     await det2.refreshStagedOnly(root);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('staged: mergeStagedIds 乐观更新——apply 成功后缓存立即并入（树零等待变绿）', async () => {
+  const { dir, gitSvc, store, hunkA, hunkB } = await setupTwoHunkScenario();
+  try {
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    assert.strictEqual(det.stagedIds(root, 'f.txt'), undefined);
+
+    // 模拟 stage 命令 apply 成功后返回的 stagedIds（只暂存了 B）
+    let changeEvents = 0;
+    det.on('change', () => changeEvents++);
+    det.mergeStagedIds(root, new Map([['f.txt', new Set([hunkB.id])]]));
+    const staged = det.stagedIds(root, 'f.txt');
+    assert.ok(staged && staged.has(hunkB.id) && !staged.has(hunkA.id));
+    assert.strictEqual(changeEvents, 1, '有新增 → emit 一次（触发树重绘）');
+
+    // 重复 merge 同一批：无新增 → 不再 emit
+    det.mergeStagedIds(root, new Map([['f.txt', new Set([hunkB.id])]]));
+    assert.strictEqual(changeEvents, 1);
+
+    // 与已有缓存合并（再暂存 A）→ partial
+    det.mergeStagedIds(root, new Map([['f.txt', new Set([hunkA.id])]]));
+    assert.strictEqual(stageStateOf([hunkA.id, hunkB.id], det.stagedIds(root, 'f.txt')), 'all');
+    assert.strictEqual(changeEvents, 2);
+
+    // 未初始化的 root：no-op 不抛
+    const det2 = new ChangeDetector(gitSvc, store, () => [dir]);
+    det2.mergeStagedIds(root, new Map([['f.txt', new Set([hunkA.id])]]));
+
+    // 空 map：no-op
+    const before = det.stagedIds(root, 'f.txt');
+    det.mergeStagedIds(root, new Map());
+    assert.strictEqual(det.stagedIds(root, 'f.txt'), before);
+    assert.strictEqual(changeEvents, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -196,6 +196,39 @@ export class ChangeDetector extends EventEmitter {
    * 单进程 diffStaged（替代 refreshAll 的三路全量），toast 到树更新的间隔显著缩短。
    * 不参与 allVersion 作废：它是事实快照，refreshRepo 每次都会整块重算 stagedByRoot。
    */
+  /**
+   * 乐观暂存更新：stage 命令 apply 成功后，把本次实际应用的 hunk ids 立即并入
+   * staged 缓存并 emit——树零等待变绿（不必等后台 diffStaged 校正）。
+   * 只增不删：本批 ids 在 index 中必然存在（apply 已成功），并入总是正确；
+   * 校正刷新（refreshStagedOnly / refreshRepo）是整块覆盖（含本批），
+   * 两个方向的竞态都收敛到同一最终态。
+   */
+  mergeStagedIds(root: string, idsByPath: ReadonlyMap<string, ReadonlySet<string>>): void {
+    if (!this.models.has(root) || idsByPath.size === 0) {
+      return;
+    }
+    const staged = new Map(this.stagedByRoot.get(root) ?? []);
+    let changed = false;
+    for (const [p, ids] of idsByPath) {
+      const next = new Set(staged.get(p));
+      let any = false;
+      for (const id of ids) {
+        if (!next.has(id)) {
+          next.add(id);
+          any = true;
+        }
+      }
+      if (any) {
+        staged.set(p, next);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.stagedByRoot.set(root, staged);
+      this.emit('change');
+    }
+  }
+
   async refreshStagedOnly(root: string): Promise<void> {
     if (!this.models.has(root)) {
       return;

@@ -316,6 +316,9 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     }
     const result = await stageUnassigned(deps.git, deps.store, repo.repoRoot);
     if (result.ok) {
+      // 乐观更新：apply 已成功，本批 ids 在 index 中必然存在——立即并入缓存，
+      // 树零等待变绿（后台 refreshStaged 再整块校正）
+      deps.detector.mergeStagedIds(repo.repoRoot, result.stagedIds);
       vscode.window.showInformationMessage(
         result.stagedCount === 0 ? t('alreadyStaged') : t('stageSuccess', result.stagedCount),
       );
@@ -325,8 +328,8 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       }
       vscode.window.showErrorMessage(t(result.error === 'empty' ? 'noAssignableHunks' : errorText(result.error)));
     }
-    // stage 只改 index：轻量刷新（只重算暂存圆点），toast 到树更新的间隔更短
-    await deps.refreshStaged();
+    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存
+    void deps.refreshStaged();
   });
 
   /** default（未分配）节点：撤销其下全部修改（其他视图的修改不受影响） */
@@ -410,6 +413,9 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       changelistId: cl.id,
     });
     if (result.ok) {
+      // 乐观更新：apply 已成功，本批 ids 在 index 中必然存在——立即并入缓存，
+      // 树零等待变绿（后台 refreshStaged 再整块校正）
+      deps.detector.mergeStagedIds(cl.repoRoot, result.stagedIds);
       vscode.window.showInformationMessage(
         result.stagedCount === 0 ? t('alreadyStaged') : t('stageSuccess', result.stagedCount),
       );
@@ -419,8 +425,8 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       }
       vscode.window.showErrorMessage(t(result.error === 'empty' ? 'noAssignableHunks' : errorText(result.error)));
     }
-    // stage 只改 index：轻量刷新（只重算暂存圆点），toast 到树更新的间隔更短
-    await deps.refreshStaged();
+    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存
+    void deps.refreshStaged();
   });
 
   register('changelistsPlus.stageHunk', async (node?: TreeNode, ...others: TreeNode[]) => {
@@ -441,6 +447,9 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     for (const [repoRoot, byPath] of records) {
       const result = await stageRecords(deps.git, repoRoot, byPath);
       if (result.ok) {
+        // 乐观更新：apply 已成功，本批 ids 在 index 中必然存在——立即并入缓存，
+        // 树零等待变绿（后台 refreshStaged 再整块校正）
+        deps.detector.mergeStagedIds(repoRoot, result.stagedIds);
         staged += result.stagedCount;
       } else {
         failed = true;
@@ -455,8 +464,8 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
         staged === 0 ? t('alreadyStaged') : t('stageSuccess', staged),
       );
     }
-    // stage 只改 index：轻量刷新（只重算暂存圆点），toast 到树更新的间隔更短
-    await deps.refreshStaged();
+    // stage 只改 index：乐观更新已让树立即变绿，后台 diffStaged 校正缓存
+    void deps.refreshStaged();
   });
 
   register('changelistsPlus.moveToChangelist', async (node?: TreeNode, ...others: TreeNode[]) => {

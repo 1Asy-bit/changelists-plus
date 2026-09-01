@@ -555,7 +555,7 @@ export async function buildUnassignedPatch(
 export type StageError = 'mergeInProgress' | 'unmerged' | 'noHead' | 'empty' | 'applyFailed';
 
 export type StageResult =
-  | { ok: true; stagedCount: number }
+  | { ok: true; stagedCount: number; stagedIds: Map<string, Set<string>> }
   | { ok: false; error: StageError; stderr?: string };
 
 /**
@@ -567,12 +567,14 @@ export type StageResult =
  */
 /**
  * 暂存指定 hunks 到 index。
- * fresh 可选：调用方（stageChangelist / stageUnassigned）收集记录时已算过全量
- * freshDiff，直接传入复用——同一批次内 worktree 无写入，两遍全量 diff 结果相同，
- * 低配机 / 大仓库下避免重复扫描。未传时自己算（stageHunk 等单文件入口）。
- * guarded 可选：调用方已跑过 guardRepo（stageChangelist / stageUnassigned 都在
- * 收集 fresh 前 guard 过）时传 true，跳过内部重复 guard——guardRepo 一次
- * 3 个 git 进程，每次暂存都省一轮。未传（false）保持内部 guard（stageHunk）。
+ * fresh / stagedText 可选：调用方（stageChangelist / stageUnassigned）收集记录时
+ * 已算过全量 freshDiff / 提前取过 diffStaged，直接传入复用——同一批次内 worktree
+ * 与 index 无写入，重复计算结果相同，低配机 / 大仓库下避免重复扫描。
+ * guarded 可选：调用方已跑过 guardRepo 时传 true，跳过内部重复 guard。
+ * 三者（guard / fresh / diffStaged）互不依赖，内部并行——guard 失败是罕见路径，
+ * diff 白跑无害（不写 index），失败后安全丢弃。
+ * 返回值附带 stagedIds（本次实际应用的 hunk ids，按路径）——命令层用它在
+ * apply 成功后**乐观更新**暂存缓存，树零等待变绿，后台再校正。
  */
 export async function stageRecords(
   git: GitService,
@@ -580,18 +582,20 @@ export async function stageRecords(
   records: Map<string, StoredHunk[]>,
   fresh?: FileChange[],
   guarded = false,
+  stagedText?: string,
 ): Promise<StageResult> {
-  if (!guarded) {
-    const guardErr = await guardRepo(git, repoRoot);
-    if (guardErr) {
-      return { ok: false, error: guardErr };
-    }
+  const [guardErr, freshChanges, stagedDiff] = await Promise.all([
+    guarded ? Promise.resolve(null) : guardRepo(git, repoRoot),
+    fresh !== undefined ? Promise.resolve(fresh) : freshDiff(git, repoRoot),
+    stagedText !== undefined ? Promise.resolve(stagedText) : git.diffStaged(repoRoot, [...records.keys()]),
+  ]);
+  if (guardErr) {
+    return { ok: false, error: guardErr };
   }
-  const freshChanges = fresh ?? (await freshDiff(git, repoRoot));
   // 已暂存的 hunk 不再重复应用（幂等 no-op）——避免对已 staged 内容 apply 报"改动已变化"；
   // diffStaged 只取 records 涉及的文件（pathspec 限制），大仓库下省掉全量 staged diff
   const stagedIdsByPath = new Map<string, Set<string>>();
-  for (const fc of parseGitDiff(await git.diffStaged(repoRoot, [...records.keys()]))) {
+  for (const fc of parseGitDiff(stagedDiff)) {
     stagedIdsByPath.set(fc.path, new Set(fc.hunks.map((h) => h.id)));
   }
   const wantByPath = new Map<string, Set<string>>();
@@ -616,7 +620,7 @@ export async function stageRecords(
   }
   if (patchFiles.length === 0) {
     // 全部已暂存：幂等成功（区别于"没有可暂存的改动"）
-    return { ok: true, stagedCount: 0 };
+    return { ok: true, stagedCount: 0, stagedIds: new Map() };
   }
   // F1：fresh 坐标含所有 worktree 改动，apply 目标是 index（只含已暂存）——
   // 纯插入 hunk 的 newStart 修正，否则上方未暂存改动会让插入点静默错位
@@ -625,7 +629,7 @@ export async function stageRecords(
   if (!applied.ok) {
     return { ok: false, error: 'applyFailed', stderr: applied.stderr };
   }
-  return { ok: true, stagedCount };
+  return { ok: true, stagedCount, stagedIds: chosenIdsByPath };
 }
 
 /**
@@ -667,11 +671,11 @@ export async function stageUnassigned(
   store: ChangelistStore,
   repoRoot: string,
 ): Promise<StageResult> {
-  const guardErr = await guardRepo(git, repoRoot);
+  // guard 与 freshDiff 并行（guard 失败是罕见路径，diff 白跑无害）
+  const [guardErr, fresh] = await Promise.all([guardRepo(git, repoRoot), freshDiff(git, repoRoot)]);
   if (guardErr) {
     return { ok: false, error: guardErr };
   }
-  const fresh = await freshDiff(git, repoRoot);
   const records = new Map<string, StoredHunk[]>();
   for (const fc of fresh) {
     const withOwner = store.recordsWithOwner(repoRoot, fc.path);
@@ -700,18 +704,26 @@ export async function stageChangelist(opts: {
   changelistId: string;
 }): Promise<StageResult> {
   const { git, store, repoRoot, changelistId } = opts;
-  const guardErr = await guardRepo(git, repoRoot);
+  // 三路并行：guard / freshDiff / diffStaged 互不依赖，合并为 1 轮进程。
+  // diffStaged 的 pathspec 提前用 store 文件集（该 changelist 所有有记录的
+  // 文件 ⊇ 本次 records 文件集，多扫的文件不产出 hunk，语义等价于 stageRecords
+  // 内部按 records 算）；guard 失败是罕见路径，diff 白跑无害（不写 index）
+  const clFiles = store.changelistsOf(repoRoot).find((c) => c.id === changelistId)?.hunks;
+  const stagedPaths = clFiles ? Object.keys(clFiles) : [];
+  const [guardErr, fresh, stagedText] = await Promise.all([
+    guardRepo(git, repoRoot),
+    freshDiff(git, repoRoot),
+    stagedPaths.length > 0 ? git.diffStaged(repoRoot, stagedPaths) : Promise.resolve(''),
+  ]);
   if (guardErr) {
     return { ok: false, error: guardErr };
   }
-  const fresh = await freshDiff(git, repoRoot);
   const records = collectRecordsForOwner(fresh, store, repoRoot, changelistId);
   if (records.size === 0) {
     return { ok: false, error: 'empty' };
   }
-  // fresh 复用 + 走 stageRecords 的「已暂存 hunk 过滤」逻辑（重复暂存 → 幂等 no-op）；
-  // guarded 复用：上方已 guardRepo，stageRecords 内不再重复跑
-  return stageRecords(git, repoRoot, records, fresh, true);
+  // fresh / stagedText / guarded 全部复用：stageRecords 内不再重复跑任何进程
+  return stageRecords(git, repoRoot, records, fresh, true, stagedText);
 }
 
 // ================= 撤销（discard，按视图） =================
