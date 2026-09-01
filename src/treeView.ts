@@ -166,7 +166,7 @@ export class ChangelistTreeProvider implements vscode.TreeDataProvider<TreeNode>
       t('unassigned'),
       vscode.TreeItemCollapsibleState.Expanded,
       'unassigned',
-      String(model.unassignedHunkCount),
+      t('fileCount', model.unassignedFileCount),
       STAGE_ICON,
       model.repoRoot,
       '',

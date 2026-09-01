@@ -51,7 +51,10 @@ export interface RepoModel {
   headExists: boolean;
   files: FileModel[];
   changelists: ChangelistModel[];
+  /** default（未分配）下的 hunk 总数 */
   unassignedHunkCount: number;
+  /** default（未分配）下有改动的文件数（树视图 default 行与 changelist 行一致显示文件数） */
+  unassignedFileCount: number;
 }
 
 /** 暂存状态（index 中 hunk 的占比）：全暂存 / 部分 / 未暂存 */
@@ -268,6 +271,7 @@ export class ChangeDetector extends EventEmitter {
       files,
       changelists: [],
       unassignedHunkCount: 0,
+      unassignedFileCount: 0,
     });
     this.computeCounts(root);
   }
@@ -352,6 +356,7 @@ export class ChangeDetector extends EventEmitter {
     }
     const byCl = new Map<string, { files: Set<string>; hunks: number }>();
     let unassigned = 0;
+    const unassignedFiles = new Set<string>();
     for (const f of model.files) {
       for (const h of f.hunks) {
         if (h.ownerId) {
@@ -364,6 +369,7 @@ export class ChangeDetector extends EventEmitter {
           e.hunks++;
         } else {
           unassigned++;
+          unassignedFiles.add(f.change.path);
         }
       }
     }
@@ -372,6 +378,7 @@ export class ChangeDetector extends EventEmitter {
       return { id: c.id, name: c.name, fileCount: e?.files.size ?? 0, hunkCount: e?.hunks ?? 0 };
     });
     model.unassignedHunkCount = unassigned;
+    model.unassignedFileCount = unassignedFiles.size;
   }
 
   getModel(root: string): RepoModel | undefined {
