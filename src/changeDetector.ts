@@ -190,6 +190,24 @@ export class ChangeDetector extends EventEmitter {
     this.emit('change');
   }
 
+  /**
+   * 只重算 index 暂存状态（stage 命令尾部用）：stage 只改 index，worktree 内容、
+   * hunk 归属都不变——树里唯一需要更新的是文件行圆点的暂存颜色。
+   * 单进程 diffStaged（替代 refreshAll 的三路全量），toast 到树更新的间隔显著缩短。
+   * 不参与 allVersion 作废：它是事实快照，refreshRepo 每次都会整块重算 stagedByRoot。
+   */
+  async refreshStagedOnly(root: string): Promise<void> {
+    if (!this.models.has(root)) {
+      return;
+    }
+    const staged = new Map<string, Set<string>>();
+    for (const fc of parseGitDiff(await this.git.diffStaged(root))) {
+      staged.set(fc.path, new Set(fc.hunks.map((h) => h.id)));
+    }
+    this.stagedByRoot.set(root, staged);
+    this.emit('change');
+  }
+
   /** 单文件定向刷新（保存 / 外部修改后触发） */
   async refreshFile(fsPath: string): Promise<void> {
     // per-file 版本号：不同文件的刷新互不作废（终端批量写入的多个文件都要同步）；

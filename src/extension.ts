@@ -97,6 +97,13 @@ export function activate(context: vscode.ExtensionContext): void {
     await detector.refreshAll();
   };
 
+  // stage 命令尾部轻量刷新：只重算 index 暂存状态（1 进程/仓库，多仓库并行）——
+  // stage 不改 worktree / 归属，全量三路 diff 是浪费；detector emit 'change'
+  // 自动驱动树重绘 + badge 更新。commit / discard / 外部 git 操作仍走 refreshAll。
+  const refreshStaged = async (): Promise<void> => {
+    await Promise.all(detector.snapshot().map((m) => detector.refreshStagedOnly(m.repoRoot)));
+  };
+
   // store 结构性变更（建/删/改名/分配）→ 全量刷新
   s.on('change', () => {
     void refreshAll();
@@ -116,6 +123,7 @@ export function activate(context: vscode.ExtensionContext): void {
     git,
     output,
     refreshAll,
+    refreshStaged,
     activeRepo: async () => {
       const editor = vscode.window.activeTextEditor;
       if (editor) {

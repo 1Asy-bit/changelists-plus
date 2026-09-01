@@ -32,6 +32,8 @@ export interface CommandDeps {
   git: GitService;
   output: vscode.OutputChannel;
   refreshAll: () => Promise<void>;
+  /** 只重算 index 暂存状态（stage 命令尾部用）——worktree 未变，跳过全量刷新 */
+  refreshStaged: () => Promise<void>;
   /** 当前活动仓库（活动编辑器所在仓库，否则第一个） */
   activeRepo: () => Promise<{ repoRoot: string } | undefined>;
   /**
@@ -323,7 +325,8 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       }
       vscode.window.showErrorMessage(t(result.error === 'empty' ? 'noAssignableHunks' : errorText(result.error)));
     }
-    await deps.refreshAll();
+    // stage 只改 index：轻量刷新（只重算暂存圆点），toast 到树更新的间隔更短
+    await deps.refreshStaged();
   });
 
   /** default（未分配）节点：撤销其下全部修改（其他视图的修改不受影响） */
@@ -416,7 +419,8 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
       }
       vscode.window.showErrorMessage(t(result.error === 'empty' ? 'noAssignableHunks' : errorText(result.error)));
     }
-    await deps.refreshAll();
+    // stage 只改 index：轻量刷新（只重算暂存圆点），toast 到树更新的间隔更短
+    await deps.refreshStaged();
   });
 
   register('changelistsPlus.stageHunk', async (node?: TreeNode, ...others: TreeNode[]) => {
@@ -451,7 +455,8 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
         staged === 0 ? t('alreadyStaged') : t('stageSuccess', staged),
       );
     }
-    await deps.refreshAll();
+    // stage 只改 index：轻量刷新（只重算暂存圆点），toast 到树更新的间隔更短
+    await deps.refreshStaged();
   });
 
   register('changelistsPlus.moveToChangelist', async (node?: TreeNode, ...others: TreeNode[]) => {

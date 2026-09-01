@@ -1956,6 +1956,52 @@ test('staged: 三态集成——无暂存 none / 部分 partial / 全暂存 all'
   }
 });
 
+test('staged: refreshStagedOnly 只重算暂存状态（stage 命令尾部轻量刷新）', async () => {
+  const { dir, gitSvc, store, hunkA, hunkB } = await setupTwoHunkScenario();
+  try {
+    const det = new ChangeDetector(gitSvc, store, () => [dir]);
+    const root = (await det.resolveRepo(dir))!;
+    await det.refreshAll();
+    const m = det.getModel(root)!;
+    assert.strictEqual(m.files.length, 1);
+
+    // stage B（git apply --cached 只动 index，worktree 不变）
+    const fc = parseGitDiff(await gitSvc.diffWorktree(dir))[0];
+    git(
+      dir,
+      ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'],
+      serializePatch([{ ...fc, hunks: [hunkB] }]),
+    );
+
+    // 轻量刷新：staged 缓存立即反映，模型其他部分（files / 归属）保持不变
+    const before = det.getModel(root)!;
+    await det.refreshStagedOnly(root);
+    const staged = det.stagedIds(root, 'f.txt');
+    assert.ok(staged && staged.has(hunkB.id) && !staged.has(hunkA.id));
+    const after = det.getModel(root)!;
+    assert.strictEqual(after.files.length, before.files.length);
+    assert.deepStrictEqual(
+      after.files[0].hunks.map((h) => h.hunk.id),
+      before.files[0].hunks.map((h) => h.hunk.id),
+    );
+
+    // 全暂存 → all
+    git(
+      dir,
+      ['apply', '--cached', '--unidiff-zero', '--whitespace=nowarn'],
+      serializePatch([{ ...fc, hunks: [hunkA] }]),
+    );
+    await det.refreshStagedOnly(root);
+    assert.strictEqual(stageStateOf([hunkA.id, hunkB.id], det.stagedIds(root, 'f.txt')), 'all');
+
+    // 未初始化的 root：no-op 不抛
+    const det2 = new ChangeDetector(gitSvc, store, () => [dir]);
+    await det2.refreshStagedOnly(root);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('staged: 提交后缓存如实反映——提交的消失、restore 保留的仍在', async () => {
   const { dir, gitSvc, store, cl, hunkA, hunkB } = await setupTwoHunkScenario();
   try {
