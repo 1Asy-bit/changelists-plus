@@ -8,6 +8,13 @@ All notable changes to Changelists Plus are documented here.
 
 ## English
 
+### 0.2.13
+
+- **Faster staging, closer to built-in feel**:
+  - Guard checks, worktree diff and staged diff now run in one parallel round — staging a changelist drops from 5 serial git round-trips to 2
+  - Optimistic update after a successful stage: the status dots turn green immediately, no waiting for the refresh pass (a background correction keeps the cache exact)
+  - After staging, the built-in Source Control "Changes" section is refreshed immediately (the git extension's index watcher would otherwise lag)
+
 ### 0.2.12
 
 - **Changelist reordering**: drag a custom changelist onto another one to move it right after it, or onto `default` / empty space to move it to the top — multi-select drag keeps the selection order; "Move Up / Move Down" at the bottom of the context menu fine-tunes positions
@@ -92,6 +99,13 @@ All notable changes to Changelists Plus are documented here.
 ---
 
 ## 中文
+
+### 0.2.13
+
+- **暂存更快，更接近原生体验**：
+  - 守卫检查 / 工作区 diff / 已暂存 diff 合并为一轮并行执行——暂存一个 changelist 的 git 串行轮数从 5 轮降为 2 轮
+  - 暂存成功后乐观更新：状态圆点立即变绿，无需等待刷新（后台再做一次校正保持缓存精确）
+  - 暂存后主动刷新内置源码管理的"更改"区（否则要等 git extension 的 index watcher 防抖）
 
 ### 0.2.12
 
