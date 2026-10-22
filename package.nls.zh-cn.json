@@ -17,5 +17,6 @@
   "changelistsPlus.command.moveChangelistDown": "下移",
   "changelistsPlus.command.moveToChangelist": "移动到 Changelist…",
   "changelistsPlus.command.assignSelection": "把选中改动分配到 Changelist…",
-  "changelistsPlus.config.gitPath": "git 可执行文件路径（默认 \"git\"）"
+  "changelistsPlus.config.gitPath": "git 可执行文件路径（默认 \"git\"）",
+  "changelistsPlus.config.repositoryScanMaxDepth": "在 workspace 文件夹子目录中扫描嵌套 git 仓库的最大深度（0 关闭扫描；语义同 git.repositoryScanMaxDepth）"
 }

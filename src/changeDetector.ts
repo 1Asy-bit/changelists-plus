@@ -19,6 +19,7 @@ import {
   parseGitDiff,
 } from './diffParser';
 import { matchFileHunks, StoredHunk } from './matching';
+import { looksLikeRepoRoot, scanForGitDirs } from './repoDiscovery';
 
 /** 归一符号链接（macOS /tmp、/var 等）；文件已不存在时保持原路径 */
 export function realpathSafe(p: string): string {
@@ -27,6 +28,49 @@ export function realpathSafe(p: string): string {
   } catch {
     return p;
   }
+}
+
+/**
+ * 路径比较键（仅用于比较，不作存储 key——store 的 repo key 保持 git 原始输出
+ * 形式，存量用户数据不受影响）：realpath 归一符号链接（macOS /tmp→/private/tmp）、
+ * path.normalize 统一分隔符（git for Windows 的 rev-parse 输出正斜杠）、
+ * Windows 大小写折叠（文件系统大小写不敏感）。
+ */
+function normKey(s: string): string {
+  const n = path.normalize(realpathSafe(s));
+  return process.platform === 'win32' ? n.toLowerCase() : n;
+}
+
+/** key 是否等于 rk 或位于其下（段边界安全；两侧均已 normalize，分隔符与 path.sep 一致） */
+function underOrEq(key: string, rk: string): boolean {
+  if (key === rk) {
+    return true;
+  }
+  // rk 已是文件系统根（POSIX '/' / Windows 'C:\'）时末尾自带分隔符，再拼一段
+  // 会得到 '//' / 'C:\\' 导致所有子路径前缀匹配失败
+  const prefix = rk.endsWith(path.sep) ? rk : rk + path.sep;
+  return key.startsWith(prefix);
+}
+
+/** 从 dir 向上找最近存在的目录（目标文件/目录可能已被删除，spawn 的 cwd 必须存在） */
+function nearestExistingDir(dir: string): string | null {
+  let d = dir;
+  for (let i = 0; i < 30; i++) {
+    // 上限防病理深树
+    try {
+      if (fs.statSync(d).isDirectory()) {
+        return d;
+      }
+    } catch {
+      /* 不存在则继续向上 */
+    }
+    const parent = path.dirname(d);
+    if (parent === d) {
+      return null;
+    }
+    d = parent;
+  }
+  return null;
 }
 
 export interface HunkOwnerModel {
@@ -103,7 +147,15 @@ export function combineStageStates(states: readonly StageState[]): StageState {
 
 export class ChangeDetector extends EventEmitter {
   private models = new Map<string, RepoModel>();
-  private folderRoots = new Map<string, string | null>();
+  /**
+   * 已知仓库集合：normKey → { root, lazy }。root 保留 git rev-parse 原始输出
+   * （store 的 repo key 形式，规范化后存储会让存量数据变孤儿）；lazy=true 表示
+   * 经 resolveRepo 回退懒发现（扫描深度之外），靠「.git 存活 + 仍在 workspace 内」
+   * 续命；lazy=false 表示 folder 解析/扫描发现，每轮 refreshAll 必须重新发现才存活。
+   */
+  private knownRepos = new Map<string, { root: string; lazy: boolean }>();
+  /** folder realpath → 仓库 root（只缓存正结果：null 不缓存，git init 后新仓库下轮即可识别） */
+  private folderRoots = new Map<string, string>();
   /** key: `${root}\u0000${path}\u0000${id}` → 连续未匹配次数 */
   private misses = new Map<string, number>();
   /**
@@ -129,62 +181,222 @@ export class ChangeDetector extends EventEmitter {
     private git: GitService,
     private store: ChangelistStore,
     private getFolders: () => string[],
+    /** 嵌套仓库扫描深度（changelistsPlus.repositoryScanMaxDepth）；getter 形式，配置即改即生效 */
+    private getScanDepth: () => number = () => 1,
   ) {
     super();
   }
 
-  /** 文件系统路径 → 所属仓库 root（经 workspace folder 缓存解析） */
+  /**
+   * 文件系统路径 → 所属仓库 root（最深仓库优先）。
+   * 两级解析：① 已知仓库集合最长前缀匹配（命中后再做祖先 .git 走查，发现
+   * 深于扫描深度的嵌套仓库）；② 未命中且仍在 workspace 内 → 从路径自身向上
+   * 找最近存在目录做 rev-parse（git 会向上走查到最近的仓库），发现的仓库
+   * 懒加入集合。负结果不缓存（git init 后新仓库才能被识别）。
+   */
   async resolveRepo(fsPath: string): Promise<string | null> {
-    // macOS 上 /tmp、/var 等是符号链接：VS Code 的 fsPath 是用户视角路径，
-    // 而 git 返回 realpath（/private/…）。不归一的话前缀匹配与 path.relative 都会错。
-    // Windows 上文件系统大小写不敏感：盘符/目录大小写差异会导致前缀匹配失败，
-    // 比较前统一转小写（path.relative 内部已按大小写不敏感比较 drive，无需处理）。
-    const fold = (s: string) => (process.platform === 'win32' ? s.toLowerCase() : s);
-    const p = realpathSafe(fsPath);
-    const folders = this.getFolders().map((f) => realpathSafe(f));
-    const folder = folders
-      .filter((f) => fold(p) === fold(f) || fold(p).startsWith(fold(f) + path.sep))
-      .sort((a, b) => b.length - a.length)[0];
-    if (!folder) {
+    const p = path.normalize(realpathSafe(fsPath));
+    const key = process.platform === 'win32' ? p.toLowerCase() : p;
+    const hit = this.matchKnownRepo(key);
+    if (hit) {
+      return (await this.discoverBetween(hit.key, p)) ?? hit.root;
+    }
+    if (!this.insideAnyFolder(key)) {
+      return null; // workspace 边界外不解析（与现状语义一致）
+    }
+    // 文件/目录可能已删除（删除场景）：spawn 的 cwd 必须存在。
+    // p 自身是现存目录（folder 输入）时从 p 查起；是文件时 isDirectory 不成立走到父目录
+    const dir = nearestExistingDir(p);
+    if (!dir) {
       return null;
     }
-    let root = this.folderRoots.get(folder);
-    if (root === undefined) {
-      root = await this.git.getRepoRoot(folder);
-      // 只缓存已确认的仓库 root：null（非仓库）不缓存——git init 后新仓库
-      // 才能被识别（refreshAll 复用了本缓存，缓存 null 会让它永久失效）。
-      // 非仓库 folder 仅在保存其内文件时才被查询，每轮最多一次 rev-parse，可接受
-      if (root !== null) {
-        this.folderRoots.set(folder, root);
-      }
+    const root = await this.git.getRepoRoot(dir);
+    if (root) {
+      this.addKnownLazy(root);
     }
     return root;
   }
 
-  async refreshAll(): Promise<void> {
-    const v = ++this.allVersion;
-    const roots = new Set<string>();
-    for (const folder of this.getFolders()) {
-      // 复用 resolveRepo 的 folderRoots 缓存：多文件夹工作区每轮全量刷新
-      // 省掉重复的 rev-parse 进程（首轮填充后即命中）
-      const r = await this.resolveRepo(folder);
-      if (r) {
-        roots.add(r);
+  /** 已知仓库中包含 key 的最长前缀项（嵌套时取最深仓库）；key 原样带出，调用方免重算 */
+  private matchKnownRepo(key: string): { root: string; key: string } | null {
+    let best: { root: string; key: string } | null = null;
+    let bestLen = -1;
+    for (const [k, e] of this.knownRepos) {
+      if (k.length > bestLen && underOrEq(key, k)) {
+        best = { root: e.root, key: k };
+        bestLen = k.length;
       }
     }
-    for (const root of roots) {
-      if (v !== this.allVersion) {
-        return; // 已有更新的全量刷新发起，丢弃本次结果（单文件刷新不参与作废）
+    return best;
+  }
+
+  /**
+   * 祖先 .git 走查：路径前缀命中已知仓库 hitKey 时，从路径自身逐级向上到该仓库，
+   * 找更深层的嵌套仓库（含 .git 的目录）。没有它，folder 根是仓库 P 时
+   * P/vendor/x/deep（深于扫描深度的仓库）里的文件前缀命中 P，嵌套仓库永远不可见。
+   * 首个命中目录经 rev-parse 规范化：得到与 hitKey 不同的根 → 懒加入并返回；
+   * rev-parse 失败（坏 .git，git 自身也止步于此）→ 中止走查，路由回 hitKey 命中项。
+   * 纯 fs existsSync（µs 级），不做负缓存——git init 出嵌套仓库后保存其内文件即可被发现。
+   */
+  private async discoverBetween(hitKey: string, p: string): Promise<string | null> {
+    // hitKey 是 map key（已 normalize+fold）；p 已是 normalize+realpath 形式，
+    // 其祖先链同形式，只需折叠大小写比较——每层不再重复 realpathSync
+    const fold = (s: string) => (process.platform === 'win32' ? s.toLowerCase() : s);
+    // 从 p 自身查起：p 是文件时 p/.git 不可能存在（existsSync false）自然下移；
+    // p 是现存目录（resolveRepo 的 folder 输入）时不错过其自身的 .git
+    let dir = p;
+    for (let i = 0; i < 20 && fold(dir).startsWith(hitKey + path.sep); i++) {
+      if (looksLikeRepoRoot(dir)) {
+        const root = await this.git.getRepoRoot(dir);
+        if (!root) {
+          return null; // 坏 .git：git 语义同样止步于此
+        }
+        if (normKey(root) !== hitKey) {
+          this.addKnownLazy(root);
+          return root;
+        }
+        return null;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) {
+        break;
+      }
+      dir = parent;
+    }
+    return null;
+  }
+
+  /**
+   * 懒发现加入已知仓库（扫描深度之外的仓库经 resolveRepo 回退发现）。
+   * 仅当确实是新仓库时 emit('reposChanged')（extension 据此重连 git watcher）；
+   * await 之后的同步 has 检查在 JS 单线程下天然去重，并发懒发现不会重复 emit。
+   */
+  private addKnownLazy(root: string): void {
+    const key = normKey(root);
+    if (this.knownRepos.has(key)) {
+      return;
+    }
+    this.knownRepos.set(key, { root, lazy: true });
+    this.emit('reposChanged');
+  }
+
+  /** key（normKey 形式）是否位于任一 workspace folder 内 */
+  private insideAnyFolder(key: string): boolean {
+    return this.getFolders().some((f) => underOrEq(key, normKey(f)));
+  }
+
+  /** 当前已知仓库根列表（git 原始输出形式），供 extension 按仓库装配 git watcher */
+  repoRoots(): string[] {
+    return [...this.knownRepos.values()].map((e) => e.root);
+  }
+
+  /**
+   * 全量刷新：重建已知仓库集合（folder 解析 ∪ 嵌套扫描 ∪ 懒发现续命）后逐仓库刷新。
+   * 集合 key 变化时 emit('reposChanged')（extension 据此重连 git watcher）——
+   * 全等比较，每轮至多一次；stale 刷新不替换集合也不发事件。
+   */
+  async refreshAll(): Promise<void> {
+    const v = ++this.allVersion;
+    const stale = (): boolean => v !== this.allVersion;
+    const next = new Map<string, { root: string; lazy: boolean }>();
+
+    // A. folder 解析：folder 根的仓库（含 folder 是父仓库子目录的情形——rev-parse 向上走查）
+    for (const folder of this.getFolders()) {
+      const f = realpathSafe(folder);
+      let root = this.folderRoots.get(f);
+      // 存活校验：.git 被删后旧缓存会刷出死仓库的空模型
+      if (root !== undefined && !looksLikeRepoRoot(root)) {
+        this.folderRoots.delete(f);
+        root = undefined;
+      }
+      if (root === undefined) {
+        const found = await this.git.getRepoRoot(f);
+        if (found !== null) {
+          this.folderRoots.set(f, found);
+          root = found;
+        }
+      }
+      if (root) {
+        next.set(normKey(root), { root, lazy: false });
+      }
+    }
+    if (stale()) {
+      return;
+    }
+
+    // B. 嵌套仓库扫描（深度可配。纯 fs readdir/existsSync，比 git 进程便宜几个
+    // 数量级，故每轮都扫——换来「仓库被删 → 下轮自动消失」语义）
+    const candidates = await scanForGitDirs(this.getFolders(), this.getScanDepth());
+    if (stale()) {
+      return;
+    }
+    for (const c of candidates) {
+      const key = normKey(c);
+      const existing = this.knownRepos.get(key);
+      if (existing) {
+        // 已知候选（含上轮懒发现）：沿用其 git 形式 root，不重复 rev-parse；提升为
+        // 扫描发现。map 的 key 即该 root 的 normKey（插入时如此构造）——直接复用，
+        // 省一次 realpathSync
+        next.set(key, { root: existing.root, lazy: false });
+        continue;
+      }
+      // 候选必须经 rev-parse 规范化：拿 git 的 realpath 规范根，与 store 既有 key 形式一致
+      const root = await this.git.getRepoRoot(c);
+      if (stale()) {
+        return;
+      }
+      if (root) {
+        next.set(normKey(root), { root, lazy: false });
+      }
+    }
+
+    // C. 懒仓库续命：.git 存活且仍在当前 workspace 内（folder 移除后其下的懒仓库不再保留）
+    for (const [key, e] of this.knownRepos) {
+      if (!next.has(key) && e.lazy && looksLikeRepoRoot(e.root) && this.insideAnyFolder(key)) {
+        next.set(key, e);
+      }
+    }
+
+    // D. 集合替换（仅 key 集合变化才发事件——lazy 标志翻转不算）
+    if (stale()) {
+      return;
+    }
+    const changed =
+      next.size !== this.knownRepos.size || [...next.keys()].some((k) => !this.knownRepos.has(k));
+    this.knownRepos = next;
+    if (changed) {
+      this.emit('reposChanged');
+    }
+
+    // E. 逐仓库刷新（单文件刷新不参与作废——见 allVersion 注释）
+    for (const { root } of next.values()) {
+      if (stale()) {
+        return;
       }
       await this.refreshRepo(root, v);
     }
-    if (v !== this.allVersion) {
-      return;
-    }
+
+    // F. 清理已移除仓库的模型与缓存。按 live knownRepos 判定（不是 next 快照）——
+    // E 期间可能经 resolveRepo 懒加入新仓库，误清会让它们的模型闪没
     for (const key of [...this.models.keys()]) {
-      if (!roots.has(key)) {
+      if (!this.knownRepos.has(normKey(key))) {
         this.models.delete(key);
         this.stagedByRoot.delete(key);
+      }
+    }
+    // misses 的 ${root}\0 前缀条目一并清（死仓库的 miss 记录否则会泄漏累积）。
+    // 按 root 去重后判定：misses 条目数 ∝ 分配 hunk 数，逐条 normKey（内含
+    // realpathSync syscall，死仓库路径还会走 throw 分支）会放大成每条一次 syscall
+    const deadRoots = new Map<string, boolean>();
+    for (const k of [...this.misses.keys()]) {
+      const root = k.slice(0, k.indexOf('\u0000'));
+      let dead = deadRoots.get(root);
+      if (dead === undefined) {
+        dead = !this.knownRepos.has(normKey(root));
+        deadRoots.set(root, dead);
+      }
+      if (dead) {
+        this.misses.delete(k);
       }
     }
     this.emit('change');
@@ -307,6 +519,11 @@ export class ChangeDetector extends EventEmitter {
       files.push(this.buildModelForChange(root, fc));
     }
     for (const rel of untracked) {
+      // 嵌套仓库目录的占位条目（git 对其不下钻，实测 -z 输出恒为正斜杠 `nested/`——
+      // 任何平台都以 '/' 结尾，勿用 path.sep）：嵌套仓库独立成组，内容不属于本仓库
+      if (rel.endsWith('/')) {
+        continue;
+      }
       if (files.some((f) => f.change.path === rel)) {
         continue;
       }

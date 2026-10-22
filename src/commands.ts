@@ -146,11 +146,20 @@ export function registerCommands(context: vscode.ExtensionContext, deps: Command
     await deps.refreshAll();
   });
 
-  register('changelistsPlus.newChangelist', async () => {
+  /**
+   * 新建 changelist。
+   * 触发入口与目标仓库：repo 节点行内按钮（多仓库时，按钮只在多仓库模式显示）→
+   * 该节点所在仓库；视图标题栏按钮（单仓库模式）/ 命令面板 → activeRepo 回退
+   * （活动编辑器所在仓库，否则第一个，与既有行为一致）。
+   */
+  register('changelistsPlus.newChangelist', async (node?: TreeNode) => {
     if (!ensureTrusted()) {
       return;
     }
-    const repo = await deps.activeRepo();
+    const repo =
+      node && node.kind === 'repo' && node.repoRoot
+        ? { repoRoot: node.repoRoot }
+        : await deps.activeRepo();
     if (!repo) {
       vscode.window.showInformationMessage(t('noGitRepo'));
       return;

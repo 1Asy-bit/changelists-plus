@@ -8,6 +8,18 @@ All notable changes to Changelists Plus are documented here.
 
 ## English
 
+### 0.3.0
+
+- **Multiple git repositories** (aligned with the built-in Changes view):
+  - Nested repositories inside a workspace folder are auto-discovered (`.git` directory or worktree / submodule pointer file); each repository gets its own group in the view with its own changelists
+  - Files are routed to the **deepest** repository they belong to — edits inside a nested repo no longer vanish from the parent repo's view
+  - Repositories deeper than the scan depth are discovered lazily when their files are saved; `git init` in a folder is picked up without restarting
+  - Per-repository git watchers: a commit / branch switch in any repository refreshes the view
+  - New setting `changelistsPlus.repositoryScanMaxDepth` (default `1`; same semantics as `git.repositoryScanMaxDepth`, `0` disables scanning)
+  - Repositories with the same name show their full path for disambiguation
+- **New Changelist per repository**: with multiple repositories open, the ＋ button moves from the view title bar onto each repository row, so you choose which repo the changelist is created in (single-repo windows keep the title-bar button)
+- **Tests**: 92 passing (zero-dependency, real git repositories)
+
 ### 0.2.13
 
 - **Faster staging, closer to built-in feel**:
@@ -99,6 +111,18 @@ All notable changes to Changelists Plus are documented here.
 ---
 
 ## 中文
+
+### 0.3.0
+
+- **多 Git 仓库支持**（对齐内置「更改」视图）：
+  - 自动发现 workspace 文件夹内的嵌套仓库（`.git` 目录或 worktree / submodule 指针文件均可识别），每个仓库在视图中独立分组、各自管理 changelist
+  - 文件按**最深仓库**归属路由——嵌套仓库内的编辑不再从父仓库视图里丢失
+  - 深于扫描深度的仓库在保存其文件时懒发现；folder 内 `git init` 无需重启即可识别
+  - 每个仓库独立监听 git 事件：任一仓库提交 / 切分支都会刷新视图
+  - 新配置项 `changelistsPlus.repositoryScanMaxDepth`（默认 `1`，语义同 `git.repositoryScanMaxDepth`，设为 `0` 关闭扫描）
+  - 同名仓库显示完整路径以区分
+- **按仓库新建 Changelist**：多仓库时「＋」按钮从视图标题栏挪到每个仓库行上，新建时可直接选择目标仓库（单仓库窗口保持标题栏按钮不变）
+- **测试**：92 个用例全部通过（零依赖、真实 git 仓库）
 
 ### 0.2.13
 

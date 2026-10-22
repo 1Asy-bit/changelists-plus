@@ -23,6 +23,7 @@ Split the changes inside a single file across multiple changelists, then commit 
 - **Safety guards** — refuses to commit during a merge / rebase / cherry-pick, with unresolved conflicts, or in an empty repository; a failing pre-commit hook leaves HEAD and the index untouched
 - **Drag & drop** (VS Code 1.66+) and multi-select batch operations
 - **Bilingual UI** — English and Simplified Chinese, follows the VS Code display language
+- **Multiple repositories** — nested git repositories inside the workspace folder are auto-discovered and grouped per repository (like the built-in Changes view), each with its own changelists; files are routed to the deepest repository they belong to; scan depth is tunable via `changelistsPlus.repositoryScanMaxDepth`
 - **Automatic refresh** — on file save and on `.git` changes (commit / branch switch)
 
 ### Quick Start
@@ -36,7 +37,7 @@ Split the changes inside a single file across multiple changelists, then commit 
 
 | Command | How to trigger | Description |
 |---|---|---|
-| New Changelist… | ＋ button in the view title bar | Create a changelist |
+| New Changelist… | ＋ button in the view title bar (on each repository row when multiple repos are open) | Create a changelist |
 | Refresh | ⟳ button in the view title bar | Re-scan the repository |
 | Commit Changelist… | right-click a changelist / ✔ inline icon | Commit only that changelist's changes |
 | Stage Changelist | right-click a changelist / ＋ inline icon | Stage that changelist to the index (worktree untouched) |
@@ -57,6 +58,7 @@ Split the changes inside a single file across multiple changelists, then commit 
 | Setting | Default | Description |
 |---|---|---|
 | `changelistsPlus.gitPath` | `git` | Path to the git executable (for non-standard installs) |
+| `changelistsPlus.repositoryScanMaxDepth` | `1` | Max depth for scanning workspace folder subdirectories for nested git repositories (`0` disables scanning; same semantics as `git.repositoryScanMaxDepth`) |
 
 ### Requirements
 
@@ -92,6 +94,7 @@ IDEA 风格 Changelist 的 VS Code 扩展：**把同一文件内的不同改动�
 - **安全守卫**——合并 / 变基 / 拣选进行中、存在未解决冲突、空仓库（无 HEAD）时拒绝提交；pre-commit hook 失败不会破坏 HEAD 与暂存区
 - **拖拽分配**（VS Code 1.66+）与**多选**批量操作
 - **中英双语界面**——随 VS Code 显示语言自动切换
+- **多仓库支持**——自动发现 workspace 文件夹内的嵌套 git 仓库并按仓库分组（对齐内置「更改」视图），各自管理 changelist；文件按最深仓库归属路由；扫描深度可通过 `changelistsPlus.repositoryScanMaxDepth` 调整
 - **自动刷新**——保存文件或 `.git` 变化（提交 / 分支切换）后自动重算
 
 ### 快速上手
@@ -105,7 +108,7 @@ IDEA 风格 Changelist 的 VS Code 扩展：**把同一文件内的不同改动�
 
 | 命令 | 触发方式 | 说明 |
 |---|---|---|
-| 新建 Changelist… | 视图标题栏 ＋ 按钮 | 新建 Changelist |
+| 新建 Changelist… | 视图标题栏 ＋ 按钮（多仓库时位于各仓库行上） | 新建 Changelist |
 | 刷新 | 视图标题栏 ⟳ 按钮 | 重新扫描仓库 |
 | 提交 Changelist… | 右键 Changelist / 行尾 ✔ 图标 | 只提交该 Changelist 的改动 |
 | 暂存 Changelist | 右键 Changelist / 行尾 ＋ 图标 | 把该 Changelist 暂存到 index（工作区不动） |
@@ -126,6 +129,7 @@ IDEA 风格 Changelist 的 VS Code 扩展：**把同一文件内的不同改动�
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `changelistsPlus.gitPath` | `git` | git 可执行文件路径（非标准安装时设置） |
+| `changelistsPlus.repositoryScanMaxDepth` | `1` | 在 workspace 文件夹子目录中扫描嵌套 git 仓库的最大深度（`0` 关闭扫描；语义同 `git.repositoryScanMaxDepth`） |
 
 ### 环境要求
 

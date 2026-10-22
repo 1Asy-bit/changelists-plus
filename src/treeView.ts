@@ -116,18 +116,29 @@ export class ChangelistTreeProvider implements vscode.TreeDataProvider<TreeNode>
     if (repos.length === 1) {
       return this.repoNodes(repos[0]);
     }
-    return repos.map(
-      (r) =>
-        new TreeNode(
-          'repo',
-          path.basename(r.repoRoot),
-          vscode.TreeItemCollapsibleState.Expanded,
-          'repo',
-          r.repoRoot,
-          'repo',
-          r.repoRoot,
-        ),
-    );
+    // 同名仓库消歧：basename 相同时 description 显示全路径区分（否则留空，
+    // 避免多仓库时行尾长路径噪音）；tooltip 恒为全路径
+    const nameCount = new Map<string, number>();
+    for (const r of repos) {
+      const base = path.basename(r.repoRoot);
+      nameCount.set(base, (nameCount.get(base) ?? 0) + 1);
+    }
+    return repos.map((r) => {
+      const base = path.basename(r.repoRoot);
+      return new TreeNode(
+        'repo',
+        base,
+        vscode.TreeItemCollapsibleState.Expanded,
+        'repo',
+        (nameCount.get(base) ?? 0) > 1 ? r.repoRoot : '',
+        'repo',
+        r.repoRoot,
+        '',
+        undefined,
+        undefined,
+        r.repoRoot,
+      );
+    });
   }
 
   /**

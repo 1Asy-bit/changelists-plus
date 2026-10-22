@@ -389,6 +389,11 @@ async function freshDiff(git: GitService, repoRoot: string): Promise<FileChange[
   const fresh: FileChange[] = parseGitDiff(diffText);
   const freshPaths = new Set(fresh.map((f) => f.path));
   for (const rel of untracked) {
+    // 嵌套仓库目录的占位条目（git 不下钻，-z 输出恒为正斜杠 `nested/`）：
+    // 嵌套仓库独立成组，其内容不属于本仓库的提交范围
+    if (rel.endsWith('/')) {
+      continue;
+    }
     if (freshPaths.has(rel)) {
       continue;
     }

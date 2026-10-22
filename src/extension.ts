@@ -65,6 +65,9 @@ export function activate(context: vscode.ExtensionContext): void {
     git,
     store,
     () => vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
+    // 嵌套仓库扫描深度：getter 形式读取，配置变更即改即生效
+    // （onDidChangeConfiguration 的 affectsConfiguration('changelistsPlus') 前缀匹配覆盖该键）
+    () => vscode.workspace.getConfiguration('changelistsPlus').get<number>('repositoryScanMaxDepth') ?? 1,
   );
   const provider = new ChangelistTreeProvider(detector, s);
   const treeView = vscode.window.createTreeView('changelistsPlus', {
@@ -112,9 +115,26 @@ export function activate(context: vscode.ExtensionContext): void {
   detector.on('change', () => {
     provider.refresh();
     updateBadge();
+    // 多仓库上下文键：驱动「新建 changelist」按钮的位置——单仓库/无仓库时在
+    // 视图标题栏（既有行为），多仓库时挪到各 repo 节点行内（package.json when
+    // 子句）。与树渲染条件同源（snapshot().length > 1 才出现 repo 分组节点）。
+    // 首次刷新完成前键为 undefined：!undefined === true → 标题栏按钮，默认形态不变
+    void vscode.commands.executeCommand(
+      'setContext',
+      'changelistsPlus.multiRepo',
+      detector.snapshot().length > 1,
+    );
+  });
+  // 仓库集合变化（嵌套仓库被发现/移除）→ 重连 git watcher。
+  // 防重入纪律：本 handler 只做 watcher 重连，绝不调 refreshAll——
+  // 集合变化的源头（refreshAll 自身 / refreshFile 懒发现路径）已经在刷新，
+  // 再触发会互作版本号作废，形成事件环
+  detector.on('reposChanged', () => {
+    void setupWatchers();
   });
   context.subscriptions.push({ dispose: () => s.removeAllListeners('change') });
   context.subscriptions.push({ dispose: () => detector.removeAllListeners('change') });
+  context.subscriptions.push({ dispose: () => detector.removeAllListeners('reposChanged') });
 
   // ---- 命令 ----
   registerCommands(context, {
@@ -262,25 +282,49 @@ export function activate(context: vscode.ExtensionContext): void {
     }, 500);
   };
   /**
+   * git watcher 按「已发现的仓库」装配：嵌套仓库各有自己的 gitdir，都要监听。
    * 监听真实 git 目录（`git rev-parse --git-dir`）而非假设 `.git` 是目录：
    * linked worktree / 子模块的 `.git` 是指针文件（内容指向真实 gitdir），
    * `.git/**` glob 匹配不到任何东西 → 提交/切分支后视图永不刷新。
    * gitdir 不在 workspace 内时 VS Code watcher 不生效（平台限制），维持现状。
+   * 未被任何已知仓库覆盖的 folder 回退 `.git/**` watcher：捕获 folder 根的
+   * git init（创建 .git/HEAD）→ refreshAll 发现新仓库 → reposChanged 重连后
+   * 该回退 watcher 自动消失。
+   *
+   * 先构建后替换 + 代数守卫：装配期间 resolveRepo 可能懒发现仓库 → 同步 emit
+   * reposChanged → 触发新一轮装配。两轮并发若交错 dispose/push 会产生重复
+   * watcher（重复触发 refreshAll）。代数失效的旧轮直接丢弃结果，且替换前
+   * 旧 watcher 一直在岗（无监听空窗）。
    */
+  let watchGen = 0;
   const setupWatchers = async (): Promise<void> => {
+    const gen = ++watchGen;
+    const patterns: vscode.RelativePattern[] = [];
+    for (const root of detector.repoRoots()) {
+      const g = await git.getGitDir(root);
+      const gitDir = g && path.isAbsolute(g) ? g : g ? path.join(root, g) : null;
+      // gitdir 解析失败（仓库刚被删除）：跳过；下轮 refreshAll 清理后
+      // reposChanged 会再触发重连
+      if (gitDir) {
+        patterns.push(new vscode.RelativePattern(gitDir, '**/*'));
+      }
+    }
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      // 已被已知仓库覆盖（folder 是仓库/在仓库内）的 folder 无需回退 watcher
+      if (await detector.resolveRepo(folder.uri.fsPath)) {
+        continue;
+      }
+      patterns.push(new vscode.RelativePattern(folder, '.git/**'));
+    }
+    if (gen !== watchGen) {
+      return; // 已有更新的装配发起（懒发现/folder 变更），丢弃本轮
+    }
     for (const w of watchers) {
       w.dispose();
     }
     watchers.length = 0;
-    for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      const g = await git.getGitDir(folder.uri.fsPath);
-      const gitDir = g && path.isAbsolute(g) ? g : g ? path.join(folder.uri.fsPath, g) : null;
-      // gitdir 解析失败（非仓库目录）：回退旧行为，`.git/**` 匹配不到时无害
-      const watcher = vscode.workspace.createFileSystemWatcher(
-        gitDir
-          ? new vscode.RelativePattern(gitDir, '**/*')
-          : new vscode.RelativePattern(folder, '.git/**'),
-      );
+    for (const p of patterns) {
+      const watcher = vscode.workspace.createFileSystemWatcher(p);
       watcher.onDidCreate(onGitEvent);
       watcher.onDidChange(onGitEvent);
       watcher.onDidDelete(onGitEvent);

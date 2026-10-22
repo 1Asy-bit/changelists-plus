@@ -2,7 +2,7 @@
   "name": "changelists-plus",
   "displayName": "Changelists Plus",
   "description": "IDEA-style changelists with partial commit: split changes inside a single file across changelists and commit them separately",
-  "version": "0.2.13",
+  "version": "0.3.0",
   "publisher": "1Asy-bit",
   "repository": {
     "type": "git",
@@ -132,7 +132,7 @@
       "view/title": [
         {
           "command": "changelistsPlus.newChangelist",
-          "when": "view == changelistsPlus",
+          "when": "view == changelistsPlus && !changelistsPlus.multiRepo",
           "group": "navigation@1"
         },
         {
@@ -142,6 +142,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "changelistsPlus.newChangelist",
+          "when": "view == changelistsPlus && viewItem == repo && changelistsPlus.multiRepo",
+          "group": "inline@1"
+        },
         {
           "command": "changelistsPlus.commitChangelist",
           "when": "view == changelistsPlus && viewItem == changelist",
@@ -326,6 +331,13 @@
           "type": "string",
           "default": "git",
           "description": "%changelistsPlus.config.gitPath%"
+        },
+        "changelistsPlus.repositoryScanMaxDepth": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "%changelistsPlus.config.repositoryScanMaxDepth%"
         }
       }
     }

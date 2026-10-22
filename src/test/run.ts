@@ -33,6 +33,7 @@ import {
 } from '../commitEngine';
 import { ChangeDetector, combineStageStates, stageStateOf } from '../changeDetector';
 import { resolveDropTargetId, resolveReorderAfterId } from '../dndTarget';
+import { looksLikeRepoRoot, scanForGitDirs } from '../repoDiscovery';
 
 const GIT = 'git';
 
@@ -2415,8 +2416,238 @@ test('engine: F1 坐标——混合 hunk（删除+插入同 patch）不偏移', 
   }
 });
 
-// ================= 主入口 =================
+// ================= 多仓库（嵌套仓库发现） =================
 
+/** 在既有目录内 init 仓库（makeRepo 自建目录；多仓库测试需要在 workspace 内摆多个子仓库） */
+function initRepo(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true });
+  git(dir, ['init', '-b', 'main', '-q']);
+  git(dir, ['config', 'user.email', 't@test']);
+  git(dir, ['config', 'user.name', 'Tester']);
+}
+
+/** git 的规范仓库根（realpath 形式，macOS /var → /private/var） */
+function repoRootOf(dir: string): string {
+  return git(dir, ['rev-parse', '--show-toplevel']).trim();
+}
+
+test('repoDiscovery: 扫描含 .git 目录/指针文件的目录，跳过 node_modules，遵守深度', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ws-'));
+  try {
+    // r1：.git 是目录；r2：.git 是指针文件（linked worktree / submodule 形态）
+    fs.mkdirSync(path.join(ws, 'r1', '.git'), { recursive: true });
+    fs.mkdirSync(path.join(ws, 'r2'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'r2', '.git'), 'gitdir: /elsewhere\n');
+    // node_modules 里的不扫（skip 集合）
+    fs.mkdirSync(path.join(ws, 'node_modules', 'dep', '.git'), { recursive: true });
+    // depth 3 的深仓库
+    fs.mkdirSync(path.join(ws, 'a', 'b', 'c', '.git'), { recursive: true });
+    const norm = (arr: string[]) => arr.map((p) => path.normalize(p)).sort();
+    assert.deepStrictEqual(
+      norm(await scanForGitDirs([ws], 1)),
+      norm([path.join(ws, 'r1'), path.join(ws, 'r2')]),
+    );
+    assert.deepStrictEqual(
+      norm(await scanForGitDirs([ws], 2)),
+      norm([path.join(ws, 'r1'), path.join(ws, 'r2')]),
+      'node_modules 跳过；a/b/c 在 depth 3 超出',
+    );
+    assert.deepStrictEqual(
+      norm(await scanForGitDirs([ws], 3)),
+      norm([path.join(ws, 'r1'), path.join(ws, 'r2'), path.join(ws, 'a', 'b', 'c')]),
+    );
+    assert.deepStrictEqual(await scanForGitDirs([ws], 0), [], 'depth=0 不扫描');
+    assert.ok(looksLikeRepoRoot(path.join(ws, 'r1')));
+    assert.ok(looksLikeRepoRoot(path.join(ws, 'r2')), '.git 指针文件也算');
+    assert.ok(!looksLikeRepoRoot(ws));
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('多仓库：workspace 内并列嵌套仓库被发现（depth=1）', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ws-'));
+  try {
+    const projA = path.join(ws, 'projA');
+    const projB = path.join(ws, 'projB');
+    initRepo(projA);
+    writeFile(projA, 'a.txt', 'a1\n');
+    commitAll(projA, 'init');
+    writeFile(projA, 'a.txt', 'a1\na2\n'); // 修改
+    initRepo(projB);
+    writeFile(projB, 'b.txt', 'b1\n');
+    commitAll(projB, 'init');
+    writeFile(projB, 'b2.txt', 'new\n'); // 未跟踪
+    const { gitSvc, store } = newEngine(ws);
+    const det = new ChangeDetector(gitSvc, store, () => [ws], () => 1);
+    await det.refreshAll();
+    const rootA = repoRootOf(projA);
+    const rootB = repoRootOf(projB);
+    assert.deepStrictEqual(
+      det.snapshot().map((m) => m.repoRoot).sort(),
+      [rootA, rootB].sort(),
+      'ws 自身非仓库，两个子仓库各自成组',
+    );
+    const ma = det.getModel(rootA);
+    assert.ok(ma);
+    assert.deepStrictEqual(ma!.files.map((f) => f.change.path), ['a.txt']);
+    const mb = det.getModel(rootB);
+    assert.ok(mb);
+    assert.deepStrictEqual(mb!.files.map((f) => f.change.path), ['b2.txt']);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('多仓库：扫描深度语义（depth 不足不发现，足够才发现）', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ws-'));
+  try {
+    const deep = path.join(ws, 'x', 'y', 'repoD'); // repoD 位于 depth 3
+    initRepo(deep);
+    writeFile(deep, 'd.txt', 'd1\n');
+    commitAll(deep, 'init');
+    writeFile(deep, 'd.txt', 'd1\nd2\n');
+    const { gitSvc, store } = newEngine(ws);
+    let det = new ChangeDetector(gitSvc, store, () => [ws], () => 1);
+    await det.refreshAll();
+    assert.strictEqual(det.snapshot().length, 0, 'depth=1 找不到 depth 3 的仓库');
+    det = new ChangeDetector(gitSvc, store, () => [ws], () => 2);
+    await det.refreshAll();
+    assert.strictEqual(det.snapshot().length, 0, 'depth=2 仍找不到');
+    det = new ChangeDetector(gitSvc, store, () => [ws], () => 3);
+    await det.refreshAll();
+    assert.strictEqual(det.snapshot().length, 1, 'depth=3 找到');
+    det = new ChangeDetector(gitSvc, store, () => [ws], () => 0);
+    await det.refreshAll();
+    assert.strictEqual(det.snapshot().length, 0, 'depth=0 关闭扫描（ws 自身非仓库 → 恒空）');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('多仓库：嵌套仓库路由到自身（最长前缀），父仓库视图不含占位目录', async () => {
+  const dir = makeRepo(); // workspace folder 本身是仓库 P
+  try {
+    writeFile(dir, 'top.txt', 't1\n');
+    commitAll(dir, 'init');
+    const nested = path.join(dir, 'nested');
+    initRepo(nested);
+    writeFile(nested, 'in.txt', 'n1\n');
+    commitAll(nested, 'init');
+    writeFile(dir, 'top.txt', 't1\nt2\n');
+    writeFile(nested, 'in.txt', 'n1\nn2\n');
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir], () => 1);
+    await det.refreshAll();
+    const rootP = repoRootOf(dir);
+    const rootN = repoRootOf(nested);
+    assert.notStrictEqual(rootP, rootN);
+    // 路由：最深仓库优先
+    assert.strictEqual(await det.resolveRepo(path.join(dir, 'top.txt')), rootP);
+    assert.strictEqual(await det.resolveRepo(path.join(nested, 'in.txt')), rootN);
+    // P 的模型只有 top.txt：git 对嵌套仓库目录不下钻（ls-files 出 `nested/` 占位），
+    // 占位条目必须被过滤（实测验证行为）
+    const mp = det.getModel(rootP);
+    assert.ok(mp);
+    assert.deepStrictEqual(mp!.files.map((f) => f.change.path), ['top.txt']);
+    const mn = det.getModel(rootN);
+    assert.ok(mn);
+    assert.deepStrictEqual(mn!.files.map((f) => f.change.path), ['in.txt']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('多仓库：扫描深度外的仓库经 resolveRepo 懒发现，reposChanged 恰好一次', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ws-'));
+  try {
+    const deep = path.join(ws, 'deep', 'repo');
+    initRepo(deep);
+    writeFile(deep, 'f.txt', 'f1\n');
+    commitAll(deep, 'init');
+    writeFile(deep, 'f.txt', 'f1\nf2\n');
+    const { gitSvc, store } = newEngine(ws);
+    const det = new ChangeDetector(gitSvc, store, () => [ws], () => 0); // 关闭扫描
+    let events = 0;
+    det.on('reposChanged', () => events++);
+    await det.refreshAll();
+    assert.strictEqual(det.snapshot().length, 0);
+    assert.strictEqual(events, 0, '集合从空到空，不发事件');
+    const file = path.join(deep, 'f.txt');
+    const root = await det.resolveRepo(file);
+    assert.strictEqual(root, repoRootOf(deep));
+    assert.strictEqual(events, 1, '懒发现触发一次 reposChanged');
+    // 重复 resolve：前缀命中已知集合（走查无获），不再发事件
+    assert.strictEqual(await det.resolveRepo(file), root);
+    assert.strictEqual(events, 1);
+    // 懒仓库在 refreshAll 后存活（.git 存活 + 仍在 workspace 内），且 key 未变不重复发
+    await det.refreshAll();
+    assert.strictEqual(det.snapshot().length, 1);
+    assert.strictEqual(events, 1);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('多仓库：父仓库内深于扫描深度的嵌套仓库经祖先走查发现', async () => {
+  const dir = makeRepo(); // P
+  try {
+    writeFile(dir, 'top.txt', 't1\n');
+    commitAll(dir, 'init');
+    const deep = path.join(dir, 'vendor', 'x', 'deep'); // depth 3，扫描（depth=1）覆盖不到
+    initRepo(deep);
+    writeFile(deep, 'f.txt', 'f1\n');
+    commitAll(deep, 'init');
+    writeFile(deep, 'f.txt', 'f1\nf2\n');
+    const { gitSvc, store } = newEngine(dir);
+    const det = new ChangeDetector(gitSvc, store, () => [dir], () => 1);
+    let events = 0;
+    det.on('reposChanged', () => events++);
+    await det.refreshAll();
+    const rootP = repoRootOf(dir);
+    const rootD = repoRootOf(deep);
+    assert.deepStrictEqual(det.snapshot().map((m) => m.repoRoot), [rootP]);
+    events = 0; // 首次 refreshAll 发现 P 已发过一次；以下只计量懒发现
+    // 文件前缀命中 P；祖先 .git 走查发现 deep（盲区用例：没有走查则永远路由到 P）
+    const r = await det.resolveRepo(path.join(deep, 'f.txt'));
+    assert.strictEqual(r, rootD, '应路由到 deep 而非 P');
+    assert.strictEqual(events, 1);
+    // P 内普通文件仍归 P（走查无获，返回前缀命中的 P）
+    assert.strictEqual(await det.resolveRepo(path.join(dir, 'top.txt')), rootP);
+    assert.strictEqual(events, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('多仓库：嵌套仓库 .git 被删后从视图移除', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ws-'));
+  try {
+    const projA = path.join(ws, 'projA');
+    initRepo(projA);
+    writeFile(projA, 'a.txt', 'a1\n');
+    commitAll(projA, 'init');
+    writeFile(projA, 'a.txt', 'a1\na2\n');
+    const { gitSvc, store } = newEngine(ws);
+    const det = new ChangeDetector(gitSvc, store, () => [ws], () => 1);
+    let events = 0;
+    det.on('reposChanged', () => events++);
+    await det.refreshAll();
+    const rootA = repoRootOf(projA);
+    assert.strictEqual(det.snapshot().length, 1);
+    assert.strictEqual(events, 1);
+    // 删除 .git → 扫描不再发现 → 集合移除 → 模型清理
+    fs.rmSync(path.join(projA, '.git'), { recursive: true, force: true });
+    await det.refreshAll();
+    assert.strictEqual(det.snapshot().length, 0, '死仓库的模型必须清理');
+    assert.strictEqual(det.getModel(rootA), undefined);
+    assert.strictEqual(events, 2, '集合变化再发一次');
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+// ================= 主入口 =================
 async function main(): Promise<void> {
   const started = Date.now();
   for (const t of tests) {
